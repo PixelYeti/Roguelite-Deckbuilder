@@ -44,3 +44,5 @@ Thumbs.db
 
 # Unity AI asset-generation local cache/history (regeneratable, not source content)
 GeneratedAssets/
+Assets/AI Toolkit/
+Assets/AI Toolkit.meta

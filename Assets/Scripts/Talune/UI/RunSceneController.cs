@@ -38,7 +38,7 @@ namespace Talune.UI
         private CombatManager _combat;
         private RewardNodeType _pendingRewardType;
         private readonly List<string> _logLines = new();
-        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill)> _enemyUI = new();
+        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow)> _enemyUI = new();
 
         // Click-a-card-then-click-a-target flow: a card needing an enemy target waits
         // here until the player picks one (or cancels), rather than requiring a target
@@ -70,6 +70,12 @@ namespace Talune.UI
         private readonly Dictionary<string, GameObject> _screens = new();
         private Camera _uiCamera;
         private RectTransform _backgroundRT;
+        private Font _pixelFont;
+        private AudioSource _musicSource;
+        private Image _transitionOverlayImg;
+        private Transform _playerStatusRow;
+        private Transform _relicRow;
+        private readonly HashSet<EnemyCombatant> _deathAnimationPlayed = new();
 
         // --- Combat screen refs ---
         private Text _playerStatsText;
@@ -113,6 +119,30 @@ namespace Talune.UI
             { MapNodeType.MysteryEvent, new Color(0.25f, 0.25f, 0.3f) },
             { MapNodeType.FractureEvent, new Color(0.3f, 0.15f, 0.35f) },
             { MapNodeType.BrambleEvent, new Color(0.2f, 0.3f, 0.15f) },
+        };
+
+        private static readonly Dictionary<CardRarity, Color> RarityGlowColor = new()
+        {
+            { CardRarity.Uncommon, new Color(0.35f, 0.6f, 0.95f, 0.8f) },
+            { CardRarity.Rare, new Color(0.95f, 0.78f, 0.25f, 0.9f) },
+        };
+
+        private static readonly Dictionary<StatusEffectType, Color> StatusColor = new()
+        {
+            { StatusEffectType.Burn, new Color(0.9f, 0.42f, 0.15f) },
+            { StatusEffectType.Growth, new Color(0.3f, 0.75f, 0.3f) },
+            { StatusEffectType.Thorns, new Color(0.55f, 0.38f, 0.18f) },
+            { StatusEffectType.Stun, new Color(0.8f, 0.8f, 0.3f) },
+            { StatusEffectType.Illusion, new Color(0.6f, 0.42f, 0.85f) },
+        };
+
+        private static readonly Dictionary<StatusEffectType, string> StatusAbbrev = new()
+        {
+            { StatusEffectType.Burn, "BRN" },
+            { StatusEffectType.Growth, "GRW" },
+            { StatusEffectType.Thorns, "THN" },
+            { StatusEffectType.Stun, "STN" },
+            { StatusEffectType.Illusion, "ILL" },
         };
 
         private Sprite _cardFrameSprite;
@@ -175,8 +205,17 @@ namespace Talune.UI
             _buttonFrameSprite = Resources.Load<Sprite>("Art/UI/ButtonFrame");
             _mapNodeFrameSprite = Resources.Load<Sprite>("Art/UI/MapNodeFrame");
             _playerTokenSprite = Resources.Load<Sprite>("Art/MapIcons/PlayerToken");
+            _pixelFont = Resources.Load<Font>("Fonts/PressStart2P-Regular");
             _sfxSource = gameObject.AddComponent<AudioSource>();
             _sfxSource.playOnAwake = false;
+
+            _musicSource = gameObject.AddComponent<AudioSource>();
+            _musicSource.playOnAwake = false;
+            _musicSource.loop = true;
+            _musicSource.volume = 0.35f; // Ambient bed, not meant to compete with SFX or the log.
+            var musicClip = Resources.Load<AudioClip>("Audio/Music/ForestAmbient");
+            if (musicClip != null) { _musicSource.clip = musicClip; _musicSource.Play(); }
+
             BuildUI();
             StartNewRun();
         }
@@ -260,6 +299,20 @@ namespace Talune.UI
         private void RefreshHUD()
         {
             _hudText.text = $"Rook  HP {_player.CurrentHP}/{_player.MaxHP}    Fragments {_runState.Fragments}    Deck {_runState.Deck.Count}    Relics {_runState.Relics.Count}";
+
+            if (_relicRow == null) return;
+            for (int i = _relicRow.childCount - 1; i >= 0; i--) DestroyImmediate(_relicRow.GetChild(i).gameObject);
+            foreach (var relic in _runState.Relics)
+            {
+                var badgeRT = CreateUIObject(relic.RelicName, _relicRow);
+                AddLayoutElement(badgeRT, preferredWidth: 24, preferredHeight: 24);
+                var img = badgeRT.gameObject.AddComponent<Image>();
+                img.sprite = GetRoundFillSprite();
+                img.color = new Color(0.55f, 0.42f, 0.15f);
+                AddDropShadow(img, new Vector2(2, -2), 0.5f);
+                var txt = CreateText(badgeRT, relic.RelicName.Length > 0 ? relic.RelicName[0].ToString() : "?", 12, TextAnchor.MiddleCenter, new Color(1f, 0.92f, 0.7f), pixelFont: true);
+                StretchFull(txt.rectTransform);
+            }
         }
 
         // ============================================================
@@ -503,7 +556,7 @@ namespace Talune.UI
                     StartCombatForNode(RewardNodeType.Elite, new List<EnemyCombatant> { DefaultContent.CreateElite() });
                     break;
                 case MapNodeType.Boss:
-                    StartCombatForNode(RewardNodeType.Boss, new List<EnemyCombatant> { DefaultContent.CreateBoss() });
+                    StartCoroutine(ShowBossIntroThenStart(DefaultContent.CreateBoss()));
                     break;
                 case MapNodeType.Treasure:
                     ShowTreasureReward();
@@ -534,6 +587,61 @@ namespace Talune.UI
             else ShowMapScreen();
         }
 
+        /// <summary>A brief title-card beat ("BOSS / GEODE WORM") before the fight itself
+        /// opens, so the biggest encounter in the Act doesn't fade in identically to a
+        /// basic mob. Purely a timed overlay - StartCombatForNode still does the real work.</summary>
+        private IEnumerator ShowBossIntroThenStart(EnemyCombatant boss)
+        {
+            var overlayRT = CreateUIObject("BossIntro", _screenContainer.transform);
+            StretchFull(overlayRT);
+            var bg = overlayRT.gameObject.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0f);
+
+            var titleText = CreateText(overlayRT, "BOSS", 22, TextAnchor.MiddleCenter, new Color(0.85f, 0.25f, 0.2f), pixelFont: true);
+            titleText.rectTransform.anchorMin = new Vector2(0.1f, 0.55f);
+            titleText.rectTransform.anchorMax = new Vector2(0.9f, 0.68f);
+            titleText.rectTransform.offsetMin = Vector2.zero;
+            titleText.rectTransform.offsetMax = Vector2.zero;
+
+            var nameText = CreateText(overlayRT, boss.DisplayName.ToUpperInvariant(), 32, TextAnchor.MiddleCenter, new Color(0.95f, 0.85f, 0.4f), pixelFont: true);
+            nameText.rectTransform.anchorMin = new Vector2(0.05f, 0.38f);
+            nameText.rectTransform.anchorMax = new Vector2(0.95f, 0.55f);
+            nameText.rectTransform.offsetMin = Vector2.zero;
+            nameText.rectTransform.offsetMax = Vector2.zero;
+
+            PlaySfx("Defeat"); // Reused as an ominous stinger - a dedicated boss-intro SFX can follow later.
+
+            const float fadeIn = 0.3f;
+            float t = 0f;
+            while (t < fadeIn)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / fadeIn);
+                bg.color = new Color(0f, 0f, 0f, Mathf.Lerp(0f, 0.92f, p));
+                float scale = Mathf.Lerp(0.5f, 1f, p);
+                nameText.rectTransform.localScale = Vector3.one * scale;
+                titleText.rectTransform.localScale = Vector3.one * scale;
+                yield return null;
+            }
+
+            yield return new WaitForSecondsRealtime(1.1f);
+
+            const float fadeOut = 0.35f;
+            t = 0f;
+            while (t < fadeOut)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / fadeOut);
+                bg.color = new Color(0f, 0f, 0f, Mathf.Lerp(0.92f, 0f, p));
+                var nc = nameText.color; nc.a = Mathf.Lerp(1f, 0f, p); nameText.color = nc;
+                var tc = titleText.color; tc.a = Mathf.Lerp(1f, 0f, p); titleText.color = tc;
+                yield return null;
+            }
+
+            Destroy(overlayRT.gameObject);
+            StartCombatForNode(RewardNodeType.Boss, new List<EnemyCombatant> { boss });
+        }
+
         // ============================================================
         // Combat screen (mostly the same engine wiring as before)
         // ============================================================
@@ -548,6 +656,7 @@ namespace Talune.UI
             _pendingCard = null;
             _pendingCardVisual = null;
             _awaitingTarget = false;
+            _deathAnimationPlayed.Clear();
 
             BuildEnemyPanels(enemies);
             ShowScreen("Combat");
@@ -619,6 +728,8 @@ namespace Talune.UI
             yield return PlayCardCastAnimation(visual);
 
             var hpBefore = _combat.Enemies.ToDictionary(e => e, e => e.CurrentHP);
+            int playerHpBefore = _combat.Player.CurrentHP;
+            int playerBlockBefore = _combat.Player.Block;
             bool hasBlockEffect = card.Effects.Any(e => e.Kind == CardEffectKind.Block);
             _combat.TryPlayCard(card, target);
             RefreshCombatUI(); // Destroys/rebuilds the hand - visual (now used) is gone after this.
@@ -631,10 +742,20 @@ namespace Talune.UI
                     anyHit = true;
                     StopAndStartTween(ui.panelImage.rectTransform, PunchScale(ui.panelImage.rectTransform));
                     StartCoroutine(FlashColor(ui.panelImage, new Color(1f, 0.3f, 0.3f), ui.panelImage.color));
+                    SpawnFloatingText(ui.panelImage.rectTransform, $"-{before - enemy.CurrentHP}", new Color(1f, 0.35f, 0.35f));
                 }
             }
-            if (anyHit) PlaySfx("Hit");
+            if (anyHit)
+            {
+                PlaySfx("Hit");
+                if (_screens.TryGetValue("Combat", out var combatScreenGO)) StartCoroutine(ShakeRect(combatScreenGO.GetComponent<RectTransform>(), 0.15f, 4f));
+            }
             else if (hasBlockEffect) PlaySfx("Block");
+
+            if (_combat.Player.CurrentHP > playerHpBefore)
+                SpawnFloatingText(_playerStatsText.rectTransform, $"+{_combat.Player.CurrentHP - playerHpBefore}", new Color(0.4f, 0.9f, 0.4f));
+            if (_combat.Player.Block > playerBlockBefore)
+                SpawnFloatingText(_playerHpFill.rectTransform, $"+{_combat.Player.Block - playerBlockBefore}", new Color(0.45f, 0.7f, 1f), 18f);
 
             _cardActionInProgress = false;
         }
@@ -699,6 +820,8 @@ namespace Talune.UI
             {
                 StopAndStartTween(_playerStatsText.rectTransform, PunchScale(_playerStatsText.rectTransform));
                 StartCoroutine(FlashColor(_playerStatsText, new Color(1f, 0.35f, 0.35f), Color.white));
+                SpawnFloatingText(_playerStatsText.rectTransform, $"-{hpBefore - _combat.Player.CurrentHP}", new Color(1f, 0.35f, 0.35f));
+                if (_screens.TryGetValue("Combat", out var combatScreenGO)) StartCoroutine(ShakeRect(combatScreenGO.GetComponent<RectTransform>(), 0.2f, 6f));
             }
 
             StartCoroutine(PlayEnemyAttackAnimations(attackers));
@@ -787,17 +910,61 @@ namespace Talune.UI
                     : (targetable ? "◆ CLICK TO TARGET ◆\n" : "") +
                       $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
                 if (ui.hpFill != null) SetHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP);
+                RefreshStatusRow(ui.statusRow, enemy);
+
+                if (enemy.IsDead && _deathAnimationPlayed.Add(enemy)) StartCoroutine(PlayEnemyDeathAnimation(ui.spriteImage));
+            }
+        }
+
+        /// <summary>Rebuilds the small pill-badge row showing an entity's active status
+        /// stacks (Burn/Growth/Thorns/Stun/Illusion) - previously only the player's had
+        /// any visibility at all, and only as text buried in the stats line; enemy
+        /// statuses weren't shown anywhere.</summary>
+        private void RefreshStatusRow(Transform container, CombatEntity entity)
+        {
+            if (container == null) return;
+            for (int i = container.childCount - 1; i >= 0; i--) DestroyImmediate(container.GetChild(i).gameObject);
+            foreach (var status in entity.AllStatuses)
+            {
+                if (status.Stacks <= 0) continue;
+                var badgeRT = CreateUIObject(status.Type.ToString(), container);
+                AddLayoutElement(badgeRT, preferredWidth: 40, preferredHeight: 20);
+                var img = badgeRT.gameObject.AddComponent<Image>();
+                img.sprite = GetRoundFillSprite();
+                img.color = StatusColor.GetValueOrDefault(status.Type, Color.gray);
+                var txt = CreateText(badgeRT, $"{StatusAbbrev.GetValueOrDefault(status.Type, "?")}{status.Stacks}", 10, TextAnchor.MiddleCenter, Color.white, pixelFont: true);
+                StretchFull(txt.rectTransform);
+            }
+        }
+
+        /// <summary>Sinks and shrinks the sprite once, the moment an enemy's HP first
+        /// hits 0 - _deathAnimationPlayed guards against re-triggering on every later
+        /// refresh while the (now-dead) panel is still on screen.</summary>
+        private static IEnumerator PlayEnemyDeathAnimation(Image spriteImg)
+        {
+            if (spriteImg == null) yield break;
+            var rt = spriteImg.rectTransform;
+            const float duration = 0.45f;
+            Vector3 startScale = rt.localScale;
+            Vector2 startPos = rt.anchoredPosition;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (rt == null) yield break;
+                rt.localScale = Vector3.Lerp(startScale, startScale * 0.5f, p);
+                rt.anchoredPosition = Vector2.Lerp(startPos, startPos + new Vector2(0, -30), p);
+                yield return null;
             }
         }
 
         private void RefreshCombatUI()
         {
             var p = _combat.Player;
-            _playerStatsText.text = $"Rook   HP {p.CurrentHP}/{p.MaxHP}   Block {p.Block}   Energy {p.Energy}/{p.MaxEnergy}   Turn {_combat.TurnCount}" +
-                (p.GetStacks(StatusEffectType.Growth) > 0 ? $"   Growth {p.GetStacks(StatusEffectType.Growth)}" : "") +
-                (p.GetStacks(StatusEffectType.Thorns) > 0 ? $"   Thorns {p.GetStacks(StatusEffectType.Thorns)}" : "") +
-                (p.GetStacks(StatusEffectType.Burn) > 0 ? $"   Burn {p.GetStacks(StatusEffectType.Burn)}" : "");
+            _playerStatsText.text = $"Rook   HP {p.CurrentHP}/{p.MaxHP}   Block {p.Block}   Energy {p.Energy}/{p.MaxEnergy}   Turn {_combat.TurnCount}";
             SetHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP);
+            RefreshStatusRow(_playerStatusRow, p);
             RefreshEnemyPanels();
             RebuildHand();
             _logText.text = string.Join("\n", _logLines.TakeLast(6));
@@ -810,7 +977,7 @@ namespace Talune.UI
             _resultOverlay.SetActive(!ongoing);
             if (!ongoing)
             {
-                _resultText.text = _combat.Outcome == CombatOutcome.Victory ? "VICTORY\n\n(click to continue)" : "DEFEATED\n\n(click to continue)";
+                _resultText.text = _combat.Outcome == CombatOutcome.Victory ? "VICTORY" : "DEFEATED";
                 if (!wasAlreadyShown) PlaySfx(_combat.Outcome == CombatOutcome.Victory ? "Victory" : "Defeat"); // Only once, on the transition.
             }
             RefreshHUD();
@@ -904,9 +1071,21 @@ namespace Talune.UI
                 hpFillImg.color = Color.green;
                 hpFillImg.raycastTarget = false;
 
+                // Status effect badges - a thin band between the health bar and the stats text.
+                var statusRowRT = CreateUIObject("StatusRow", panelRT);
+                statusRowRT.anchorMin = new Vector2(0.05f, sprite != null ? 0.20f : 0f);
+                statusRowRT.anchorMax = new Vector2(0.95f, sprite != null ? 0.29f : 0.1f);
+                statusRowRT.offsetMin = Vector2.zero;
+                statusRowRT.offsetMax = Vector2.zero;
+                var statusLayout = statusRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+                statusLayout.spacing = 4;
+                statusLayout.childAlignment = TextAnchor.MiddleCenter;
+                statusLayout.childForceExpandWidth = false;
+                statusLayout.childForceExpandHeight = true;
+
                 var textRT = CreateUIObject("Text", panelRT);
                 textRT.anchorMin = new Vector2(0, 0);
-                textRT.anchorMax = new Vector2(1, sprite != null ? 0.29f : 1f);
+                textRT.anchorMax = new Vector2(1, sprite != null ? 0.19f : 1f);
                 textRT.offsetMin = new Vector2(0, 10); // clears the panel frame's bottom border.
                 textRT.offsetMax = Vector2.zero;
                 var text = textRT.gameObject.AddComponent<Text>();
@@ -920,7 +1099,7 @@ namespace Talune.UI
 
                 AddDecorativeFrame(panelRT, _panelFrameSprite); // last, so the ornate border sits on top of sprite/bar/text.
 
-                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg);
+                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT);
             }
         }
 
@@ -1131,6 +1310,31 @@ namespace Talune.UI
             // The map's background parallax only makes sense while the map itself is
             // visible - reset it so every other screen sees the biome centered.
             if (name != "Map" && _backgroundRT != null) _backgroundRT.anchoredPosition = Vector2.zero;
+            // Purely decorative flash-to-black - fire-and-forget, doesn't gate or delay
+            // the SetActive/content-rebuild above, which both already happen synchronously.
+            if (_transitionOverlayImg != null) StopAndStartTween(_transitionOverlayImg.rectTransform, FlashTransition(_transitionOverlayImg));
+        }
+
+        private static IEnumerator FlashTransition(Image overlay)
+        {
+            const float half = 0.08f;
+            float t = 0f;
+            while (t < half)
+            {
+                t += Time.unscaledDeltaTime;
+                if (overlay == null) yield break;
+                var c = overlay.color; c.a = Mathf.Lerp(0f, 0.5f, t / half); overlay.color = c;
+                yield return null;
+            }
+            t = 0f;
+            while (t < half)
+            {
+                t += Time.unscaledDeltaTime;
+                if (overlay == null) yield break;
+                var c = overlay.color; c.a = Mathf.Lerp(0.5f, 0f, t / half); overlay.color = c;
+                yield return null;
+            }
+            if (overlay != null) { var c = overlay.color; c.a = 0f; overlay.color = c; }
         }
 
         // ============================================================
@@ -1191,9 +1395,25 @@ namespace Talune.UI
             var hudImg = hudRT.gameObject.AddComponent<Image>();
             hudImg.color = new Color(0.08f, 0.08f, 0.1f);
             AddDecorativeFrame(hudRT, _panelFrameSprite);
-            _hudText = CreateText(hudRT, "", 16, TextAnchor.MiddleLeft, new Color(0.9f, 0.85f, 0.6f));
+            _hudText = CreateText(hudRT, "", 16, TextAnchor.MiddleLeft, new Color(0.9f, 0.85f, 0.6f)); // Full dynamic stat line - too long/variable for the wide pixel font.
             StretchFull(_hudText.rectTransform);
             _hudText.rectTransform.offsetMin += new Vector2(10, 0);
+
+            // Relic icons - the count already lives in _hudText, but not which relics;
+            // this is the only place a run's relics are visible at all during play.
+            var relicRowRT = CreateUIObject("RelicRow", hudRT);
+            relicRowRT.anchorMin = new Vector2(1f, 0f);
+            relicRowRT.anchorMax = new Vector2(1f, 1f);
+            relicRowRT.pivot = new Vector2(1f, 0.5f);
+            relicRowRT.sizeDelta = new Vector2(340, 0);
+            relicRowRT.anchoredPosition = new Vector2(-10, 0);
+            var relicLayout = relicRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            relicLayout.spacing = 4;
+            relicLayout.childAlignment = TextAnchor.MiddleRight;
+            relicLayout.childForceExpandWidth = false;
+            relicLayout.childForceExpandHeight = true;
+            relicLayout.padding = new RectOffset(0, 0, 4, 4);
+            _relicRow = relicRowRT;
 
             // Screen container - exactly one child active at a time.
             var containerRT = CreateUIObject("ScreenContainer", root);
@@ -1207,6 +1427,14 @@ namespace Talune.UI
             BuildShopScreen(containerRT);
             BuildMessageScreen(containerRT);
             BuildRunEndScreen(containerRT);
+
+            // A purely decorative flash-to-black on every screen change (see ShowScreen) -
+            // sits above every screen (last sibling under the canvas), never blocks clicks.
+            var transitionRT = CreateUIObject("TransitionOverlay", canvasGO.transform);
+            StretchFull(transitionRT);
+            _transitionOverlayImg = transitionRT.gameObject.AddComponent<Image>();
+            _transitionOverlayImg.color = new Color(0f, 0f, 0f, 0f);
+            _transitionOverlayImg.raycastTarget = false;
         }
 
         private void BuildMapScreen(Transform parent)
@@ -1337,6 +1565,15 @@ namespace Talune.UI
             _playerHpFill.fillAmount = 1f;
             _playerHpFill.color = Color.green;
 
+            var playerStatusRowRT = CreateUIObject("PlayerStatusRow", bottomBarRT);
+            AddLayoutElement(playerStatusRowRT, preferredHeight: 20);
+            var playerStatusLayout = playerStatusRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            playerStatusLayout.spacing = 4;
+            playerStatusLayout.childAlignment = TextAnchor.MiddleLeft;
+            playerStatusLayout.childForceExpandWidth = false;
+            playerStatusLayout.childForceExpandHeight = true;
+            _playerStatusRow = playerStatusRowRT;
+
             // Hand area: draw pile | hand (fanned) | discard pile - a real deck of cards,
             // not just a floating row.
             var handAreaRT = CreateUIObject("HandArea", bottomBarRT);
@@ -1367,8 +1604,19 @@ namespace Talune.UI
             _resultOverlayButton = overlayRT.gameObject.AddComponent<Button>();
             _resultOverlayButton.targetGraphic = overlayImg;
             _resultOverlayButton.onClick.AddListener(OnCombatResultContinue);
-            _resultText = CreateText(overlayRT, "", 64, TextAnchor.MiddleCenter, Color.white);
-            StretchFull(_resultText.rectTransform);
+
+            _resultText = CreateText(overlayRT, "", 52, TextAnchor.MiddleCenter, Color.white, pixelFont: true);
+            _resultText.rectTransform.anchorMin = new Vector2(0f, 0.5f);
+            _resultText.rectTransform.anchorMax = new Vector2(1f, 0.82f);
+            _resultText.rectTransform.offsetMin = Vector2.zero;
+            _resultText.rectTransform.offsetMax = Vector2.zero;
+
+            var resultSubtitle = CreateText(overlayRT, "(click to continue)", 18, TextAnchor.MiddleCenter, new Color(0.8f, 0.8f, 0.8f));
+            resultSubtitle.rectTransform.anchorMin = new Vector2(0f, 0.4f);
+            resultSubtitle.rectTransform.anchorMax = new Vector2(1f, 0.5f);
+            resultSubtitle.rectTransform.offsetMin = Vector2.zero;
+            resultSubtitle.rectTransform.offsetMax = Vector2.zero;
+
             _resultOverlay = overlayRT.gameObject;
             _resultOverlay.SetActive(false);
 
@@ -1514,7 +1762,7 @@ namespace Talune.UI
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
 
-            var title = CreateText(screen, "", 48, TextAnchor.MiddleCenter, new Color(0.9f, 0.85f, 0.6f));
+            var title = CreateText(screen, "", 38, TextAnchor.MiddleCenter, new Color(0.9f, 0.85f, 0.6f), pixelFont: true);
             title.name = "Title";
             AddLayoutElement(title.rectTransform, preferredHeight: 70);
             var summary = CreateText(screen, "", 18, TextAnchor.UpperCenter);
@@ -1569,6 +1817,21 @@ namespace Talune.UI
             var btn = slot.gameObject.AddComponent<Button>();
             btn.targetGraphic = hitArea;
             btn.interactable = affordable;
+
+            // Rarity glow - the card frame silhouette again, oversized and tinted, sitting
+            // behind Visual (earlier sibling = drawn first = behind). Common cards get none.
+            if (RarityGlowColor.TryGetValue(card.Rarity, out var glowColor))
+            {
+                var glowRT = CreateUIObject("RarityGlow", slot);
+                StretchFull(glowRT);
+                glowRT.offsetMin -= new Vector2(8, 8);
+                glowRT.offsetMax += new Vector2(8, 8);
+                var glowImg = glowRT.gameObject.AddComponent<Image>();
+                glowImg.sprite = _cardFrameSprite;
+                glowImg.type = Image.Type.Simple;
+                glowImg.color = glowColor;
+                glowImg.raycastTarget = false;
+            }
 
             var visual = CreateUIObject("Visual", slot);
             StretchFull(visual);
@@ -1796,6 +2059,70 @@ namespace Talune.UI
             shadow.effectDistance = distance;
         }
 
+        /// <summary>A "-6"/"+5" popup that rises and fades over `parent` - the standard
+        /// genre convention for damage/heal/block feedback, previously only conveyed via
+        /// the combat log and a color flash.</summary>
+        private void SpawnFloatingText(RectTransform parent, string text, Color color, float fontSize = 24f)
+        {
+            if (parent == null) return;
+            var rt = CreateUIObject("FloatingText", parent);
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(Random.Range(-18f, 18f), 10f);
+            rt.sizeDelta = new Vector2(200, 60);
+            var txt = rt.gameObject.AddComponent<Text>();
+            txt.font = PixelFont();
+            txt.fontSize = (int)fontSize;
+            txt.alignment = TextAnchor.MiddleCenter;
+            txt.color = color;
+            txt.raycastTarget = false;
+            txt.horizontalOverflow = HorizontalWrapMode.Overflow;
+            txt.verticalOverflow = VerticalWrapMode.Overflow;
+            txt.text = text;
+            AddDropShadow(txt, new Vector2(2, -2), 0.85f);
+            StartCoroutine(FloatAndFade(rt, txt));
+        }
+
+        private static IEnumerator FloatAndFade(RectTransform rt, Text txt)
+        {
+            const float duration = 0.9f;
+            Vector2 start = rt.anchoredPosition;
+            Vector2 end = start + new Vector2(0, 55);
+            Color baseColor = txt.color;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (rt == null || txt == null) yield break;
+                rt.anchoredPosition = Vector2.Lerp(start, end, p);
+                float pop = p < 0.15f ? Mathf.Lerp(0.4f, 1.15f, p / 0.15f) : Mathf.Lerp(1.15f, 1f, Mathf.Clamp01((p - 0.15f) / 0.2f));
+                rt.localScale = Vector3.one * pop;
+                var c = baseColor;
+                c.a = p < 0.55f ? baseColor.a : Mathf.Lerp(baseColor.a, 0f, (p - 0.55f) / 0.45f);
+                txt.color = c;
+                yield return null;
+            }
+            if (rt != null) Destroy(rt.gameObject);
+        }
+
+        /// <summary>A brief random jitter, falling off to zero - used sparingly (a
+        /// meaningful hit landing, not every tiny action) so it stays an accent.</summary>
+        private static IEnumerator ShakeRect(RectTransform rt, float duration, float magnitude)
+        {
+            if (rt == null) yield break;
+            Vector2 basePos = rt.anchoredPosition;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                if (rt == null) yield break;
+                float falloff = 1f - t / duration;
+                rt.anchoredPosition = basePos + Random.insideUnitCircle * magnitude * falloff;
+                yield return null;
+            }
+            if (rt != null) rt.anchoredPosition = basePos;
+        }
+
         private static IEnumerator TweenCard(RectTransform rt, Vector2 targetPos, Vector3 targetScale)
         {
             const float duration = 0.12f;
@@ -1878,11 +2205,17 @@ namespace Talune.UI
             return f != null ? f : Resources.GetBuiltinResource<Font>("Arial.ttf");
         }
 
-        private static Text CreateText(Transform parent, string content, int fontSize, TextAnchor anchor, Color? color = null)
+        /// <summary>"Press Start 2P" (OFL-licensed) - a genuinely blocky pixel display
+        /// font, reserved for short strings (titles, HUD, buttons, numbers). It's too
+        /// wide/chunky for dense paragraph text (card bodies, the combat log), which
+        /// keep the regular font on purpose - see every CreateText(pixelFont: true) call.</summary>
+        private Font PixelFont() => _pixelFont != null ? _pixelFont : BuiltinFont();
+
+        private Text CreateText(Transform parent, string content, int fontSize, TextAnchor anchor, Color? color = null, bool pixelFont = false)
         {
             var rt = CreateUIObject("Text", parent);
             var text = rt.gameObject.AddComponent<Text>();
-            text.font = BuiltinFont();
+            text.font = pixelFont ? PixelFont() : BuiltinFont();
             text.text = content;
             text.fontSize = fontSize;
             text.alignment = anchor;

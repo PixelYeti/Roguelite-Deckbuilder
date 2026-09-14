@@ -190,11 +190,12 @@ namespace Talune.Content
 
         public static List<CardData> BuildRewardPool() => new()
         {
-            StaticFang(), BubbleGuard(), RootStrike(), Stormroot(), Stormwater(), Bloomtide(),
-            FoamShield(), RefreshingRain(), BubbleBurst(), TidalPush(),
-            ChainSpark(), Overcharge(), Thunderbolt(),
-            BrambleSlam(), Overgrowth(), ThornGuard(), Seedburst(),
-            SecondWind(), Focus(), TwinStrike(), Bulwark(),
+            StaticFang(), BubbleGuard(), RootStrike(),
+            WithRarity(Stormroot(), CardRarity.Rare), WithRarity(Stormwater(), CardRarity.Rare), WithRarity(Bloomtide(), CardRarity.Rare),
+            FoamShield(), WithRarity(RefreshingRain(), CardRarity.Uncommon), WithRarity(BubbleBurst(), CardRarity.Uncommon), TidalPush(),
+            WithRarity(ChainSpark(), CardRarity.Uncommon), Overcharge(), WithRarity(Thunderbolt(), CardRarity.Uncommon),
+            BrambleSlam(), WithRarity(Overgrowth(), CardRarity.Uncommon), ThornGuard(), WithRarity(Seedburst(), CardRarity.Uncommon),
+            SecondWind(), Focus(), TwinStrike(), WithRarity(Bulwark(), CardRarity.Uncommon),
         };
 
         // --- Relics (Fix: "modify rules, not flat bonuses" - see RelicEffectKind) ---
@@ -240,6 +241,15 @@ namespace Talune.Content
         {
             card.UpgradedDescription = upgradedDescription;
             card.UpgradedEffects = new List<CardEffect>(upgradedEffects);
+            return card;
+        }
+
+        /// <summary>Card.Rarity defaults to Common, so only Uncommon/Rare reward-pool
+        /// cards need to route through this. Hybrids (Fix 5: a Type, not a rarity) are
+        /// tagged Rare here purely for the reward screen's visual treatment.</summary>
+        private static CardData WithRarity(CardData card, CardRarity rarity)
+        {
+            card.Rarity = rarity;
             return card;
         }
 

@@ -15,6 +15,7 @@ namespace Talune.Cards
         public string CardName;
         [TextArea] public string Description;
         public CardType Type;
+        public CardRarity Rarity; // Defaults to Common - only reward-pool cards above Common need to set this explicitly.
         public List<KinType> KinTags = new(); // 0 = Neutral, 1 = single-Kin, 2 = Hybrid (Type must be Hybrid).
         [Range(0, 3)] public int EnergyCost;
         public List<CardEffect> Effects = new();
