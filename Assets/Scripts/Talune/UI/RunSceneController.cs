@@ -101,6 +101,8 @@ namespace Talune.UI
 
         private Sprite _cardFrameSprite;
         private Sprite _combatBackgroundSprite;
+        private Sprite _panelFrameSprite;
+        private Sprite _buttonFrameSprite;
         private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
         private readonly Dictionary<CardType, Sprite> _cardIconCache = new();
 
@@ -138,6 +140,8 @@ namespace Talune.UI
         {
             _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
             _combatBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/CombatBackground");
+            _panelFrameSprite = Resources.Load<Sprite>("Art/UI/PanelFrame");
+            _buttonFrameSprite = Resources.Load<Sprite>("Art/UI/ButtonFrame");
             _sfxSource = gameObject.AddComponent<AudioSource>();
             _sfxSource.playOnAwake = false;
             BuildUI();
@@ -721,7 +725,7 @@ namespace Talune.UI
                 var textRT = CreateUIObject("Text", panelRT);
                 textRT.anchorMin = new Vector2(0, 0);
                 textRT.anchorMax = new Vector2(1, sprite != null ? 0.29f : 1f);
-                textRT.offsetMin = Vector2.zero;
+                textRT.offsetMin = new Vector2(0, 10); // clears the panel frame's bottom border.
                 textRT.offsetMax = Vector2.zero;
                 var text = textRT.gameObject.AddComponent<Text>();
                 text.font = BuiltinFont();
@@ -731,6 +735,8 @@ namespace Talune.UI
                 text.horizontalOverflow = HorizontalWrapMode.Wrap;
                 text.verticalOverflow = VerticalWrapMode.Overflow;
                 text.raycastTarget = false;
+
+                AddDecorativeFrame(panelRT, _panelFrameSprite); // last, so the ornate border sits on top of sprite/bar/text.
 
                 _enemyUI[enemy] = (img, spriteImg, text, hpFillImg);
             }
@@ -994,6 +1000,7 @@ namespace Talune.UI
             AddLayoutElement(hudRT, preferredHeight: 32);
             var hudImg = hudRT.gameObject.AddComponent<Image>();
             hudImg.color = new Color(0.08f, 0.08f, 0.1f);
+            AddDecorativeFrame(hudRT, _panelFrameSprite);
             _hudText = CreateText(hudRT, "", 16, TextAnchor.MiddleLeft, new Color(0.9f, 0.85f, 0.6f));
             StretchFull(_hudText.rectTransform);
             _hudText.rectTransform.offsetMin += new Vector2(10, 0);
@@ -1061,6 +1068,7 @@ namespace Talune.UI
             AddLayoutElement(instructionsRT, preferredHeight: 40);
             var instructionsImg = instructionsRT.gameObject.AddComponent<Image>();
             instructionsImg.color = new Color(0.10f, 0.13f, 0.10f);
+            AddDecorativeFrame(instructionsRT, _panelFrameSprite);
             _instructionsText = CreateText(instructionsRT, "", 14, TextAnchor.MiddleCenter, new Color(0.85f, 0.9f, 0.85f));
             StretchFull(_instructionsText.rectTransform);
             ResetInstructionsText();
@@ -1076,6 +1084,7 @@ namespace Talune.UI
             AddLayoutElement(logPanelRT, flexibleHeight: 1);
             var bgImg = logPanelRT.gameObject.AddComponent<Image>();
             bgImg.color = PanelBg;
+            AddDecorativeFrame(logPanelRT, _panelFrameSprite);
             _logText = CreateText(logPanelRT, "", 15, TextAnchor.UpperLeft);
             StretchFull(_logText.rectTransform);
             _logText.rectTransform.offsetMin += new Vector2(10, 6);
@@ -1083,7 +1092,11 @@ namespace Talune.UI
 
             var bottomBarRT = CreateUIObject("BottomBar", screen);
             AddLayoutElement(bottomBarRT, preferredHeight: 260);
+            var bottomBarImg = bottomBarRT.gameObject.AddComponent<Image>();
+            bottomBarImg.color = PanelBg;
+            AddDecorativeFrame(bottomBarRT, _panelFrameSprite);
             var bottomLayout = bottomBarRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            bottomLayout.padding = new RectOffset(18, 18, 12, 10); // clears the panel frame's ~24px border.
             bottomLayout.spacing = 8;
             bottomLayout.childForceExpandWidth = true;
             bottomLayout.childForceExpandHeight = false;
@@ -1587,13 +1600,29 @@ namespace Talune.UI
             return text;
         }
 
-        private static Button CreateButton(Transform parent, string label, UnityAction onClick, Color bg, int fontSize = 16)
+        /// <summary>Purely decorative ornate border overlay (transparent center, 9-sliced) laid on top
+        /// of an existing flat-color Image - mirrors how CardFrame overlays card art, so the underlying
+        /// color-coding (button semantics, enemy target state, etc.) keeps working untouched.</summary>
+        private static void AddDecorativeFrame(Transform parent, Sprite frameSprite)
+        {
+            if (frameSprite == null) return;
+            var overlayRT = CreateUIObject("FrameOverlay", parent);
+            StretchFull(overlayRT);
+            var img = overlayRT.gameObject.AddComponent<Image>();
+            img.sprite = frameSprite;
+            img.type = Image.Type.Sliced;
+            img.color = Color.white;
+            img.raycastTarget = false;
+        }
+
+        private Button CreateButton(Transform parent, string label, UnityAction onClick, Color bg, int fontSize = 16)
         {
             var rt = CreateUIObject("Button", parent);
             var img = rt.gameObject.AddComponent<Image>();
             img.color = bg;
             var btn = rt.gameObject.AddComponent<Button>();
             btn.targetGraphic = img;
+            AddDecorativeFrame(rt, _buttonFrameSprite);
             var txt = CreateText(rt, label, fontSize, TextAnchor.MiddleCenter);
             StretchFull(txt.rectTransform);
             if (onClick != null) btn.onClick.AddListener(onClick);
