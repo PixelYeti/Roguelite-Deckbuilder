@@ -83,6 +83,9 @@ namespace Talune.UI
 
         // --- Shared chrome ---
         private Text _hudText;
+        private Image _hudHpFill;
+        private RectTransform _hudHpBarRT;
+        private RectTransform _playerHpBarRT;
         private GameObject _root; // HUD + ScreenContainer together - hidden entirely behind the title screen until a run actually starts.
         private GameObject _screenContainer;
         private Transform _canvasTransform; // Parent for ephemeral overlays (Tutorial/Intro) that must render even while _root is hidden.
@@ -107,6 +110,7 @@ namespace Talune.UI
             "Fall, and the run ends - but Essence carries forward. What you learn is never entirely lost.\n\nFind Vorath. End the Fracture.",
         };
         private Image _transitionOverlayImg;
+        private Image _bigTransitionOverlayImg;
         private Transform _playerStatusRow;
         private Transform _relicRow;
         private readonly HashSet<EnemyCombatant> _deathAnimationPlayed = new();
@@ -368,11 +372,11 @@ namespace Talune.UI
             {
                 PlayerPrefs.SetInt(IntroSeenKey, 1);
                 PlayerPrefs.Save();
-                ShowIntroPage(0, StartNewRun);
+                ShowIntroPage(0, () => StartCoroutine(FadeToBlackThen(StartNewRun)));
             }
             else
             {
-                StartNewRun();
+                StartCoroutine(FadeToBlackThen(StartNewRun));
             }
         }
 
@@ -465,6 +469,7 @@ namespace Talune.UI
         private void RefreshHUD()
         {
             _hudText.text = $"Rook  HP {_player.CurrentHP}/{_player.MaxHP}    Fragments {_runState.Fragments}    Deck {_runState.Deck.Count}    Relics {_runState.Relics.Count}    Act {_actIndex + 1}/{ActCount}";
+            SetHealthBarFill(_hudHpFill, _player.CurrentHP, _player.MaxHP);
 
             if (_relicRow == null) return;
             for (int i = _relicRow.childCount - 1; i >= 0; i--) DestroyImmediate(_relicRow.GetChild(i).gameObject);
@@ -1286,6 +1291,10 @@ namespace Talune.UI
                 StartCoroutine(FlashColor(_playerStatsText, new Color(1f, 0.35f, 0.35f), Color.white));
                 SpawnFloatingText(_playerStatsText.rectTransform, $"-{hpBefore - _combat.Player.CurrentHP}", new Color(1f, 0.35f, 0.35f));
                 if (_screens.TryGetValue("Combat", out var combatScreenGO)) StartCoroutine(ShakeRect(combatScreenGO.GetComponent<RectTransform>(), 0.2f, 6f));
+                // The bar itself also punches - the fillAmount change alone is easy to miss
+                // next to all of the above, especially on a small HP drop.
+                if (_playerHpBarRT != null) StopAndStartTween(_playerHpBarRT, PunchScale(_playerHpBarRT));
+                if (_hudHpBarRT != null) StopAndStartTween(_hudHpBarRT, PunchScale(_hudHpBarRT));
             }
 
             StartCoroutine(PlayEnemyAttackAnimations(attackers));
@@ -1999,9 +2008,34 @@ namespace Talune.UI
             var hudImg = hudRT.gameObject.AddComponent<Image>();
             hudImg.color = new Color(0.08f, 0.08f, 0.1f);
             AddDecorativeFrame(hudRT, _panelFrameSprite);
+
+            // A real HP bar, not just the "HP 70/70" text below - this is the only HP
+            // display visible outside combat (Map, Shop, everywhere), so it's the one
+            // most likely to be what a player expects to see move when they take a hit.
+            var hudHpBarBgRT = CreateUIObject("HudHpBarBg", hudRT);
+            hudHpBarBgRT.anchorMin = new Vector2(0f, 0.5f);
+            hudHpBarBgRT.anchorMax = new Vector2(0f, 0.5f);
+            hudHpBarBgRT.pivot = new Vector2(0f, 0.5f);
+            hudHpBarBgRT.sizeDelta = new Vector2(90, 14);
+            hudHpBarBgRT.anchoredPosition = new Vector2(10, 0);
+            var hudHpBarBgImg = hudHpBarBgRT.gameObject.AddComponent<Image>();
+            hudHpBarBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
+            var hudHpBarFillRT = CreateUIObject("Fill", hudHpBarBgRT);
+            hudHpBarFillRT.anchorMin = Vector2.zero;
+            hudHpBarFillRT.anchorMax = Vector2.one;
+            hudHpBarFillRT.offsetMin = new Vector2(1, 1);
+            hudHpBarFillRT.offsetMax = new Vector2(-1, -1);
+            _hudHpFill = hudHpBarFillRT.gameObject.AddComponent<Image>();
+            _hudHpFill.type = Image.Type.Filled;
+            _hudHpFill.fillMethod = Image.FillMethod.Horizontal;
+            _hudHpFill.fillOrigin = (int)Image.OriginHorizontal.Left;
+            _hudHpFill.fillAmount = 1f;
+            _hudHpFill.color = Color.green;
+            _hudHpBarRT = hudHpBarBgRT;
+
             _hudText = CreateText(hudRT, "", 16, TextAnchor.MiddleLeft, new Color(0.9f, 0.85f, 0.6f)); // Full dynamic stat line - too long/variable for the wide pixel font.
             StretchFull(_hudText.rectTransform);
-            _hudText.rectTransform.offsetMin += new Vector2(10, 0);
+            _hudText.rectTransform.offsetMin += new Vector2(10 + 90 + 10, 0); // clears the new HP bar.
 
             // Relic icons - the count already lives in _hudText, but not which relics;
             // this is the only place a run's relics are visible at all during play.
@@ -2067,6 +2101,46 @@ namespace Talune.UI
             _transitionOverlayImg.raycastTarget = false;
 
             BuildTitleScreen(canvasGO.transform); // Last, so it renders on top of everything (Root/Background/overlays included) while active.
+
+            // A dedicated full fade-to-black for major transitions (title screen -> the
+            // first run) - separate from _transitionOverlayImg above, whose own per-screen
+            // flash (see ShowScreen/FlashTransition) would otherwise fight over the same
+            // Image/coroutine slot mid-fade. Added after BuildTitleScreen so it can cover
+            // the title screen too, not just the game screens underneath it.
+            var bigTransitionRT = CreateUIObject("BigTransitionOverlay", canvasGO.transform);
+            StretchFull(bigTransitionRT);
+            _bigTransitionOverlayImg = bigTransitionRT.gameObject.AddComponent<Image>();
+            _bigTransitionOverlayImg.color = new Color(0f, 0f, 0f, 0f);
+            _bigTransitionOverlayImg.raycastTarget = false;
+        }
+
+        /// <summary>Fades fully to black, runs `action` while the screen is hidden, then
+        /// fades back in - used for the title-screen-to-first-run cut, which otherwise is
+        /// an instant SetActive(false) with nothing hiding the pop (see OnNewRunClicked).</summary>
+        private IEnumerator FadeToBlackThen(UnityAction action)
+        {
+            if (_bigTransitionOverlayImg == null) { action(); yield break; }
+            const float fadeTime = 0.25f;
+            float t = 0f;
+            while (t < fadeTime)
+            {
+                t += Time.unscaledDeltaTime;
+                var c = _bigTransitionOverlayImg.color; c.a = Mathf.Lerp(0f, 1f, t / fadeTime); _bigTransitionOverlayImg.color = c;
+                yield return null;
+            }
+            var full = _bigTransitionOverlayImg.color; full.a = 1f; _bigTransitionOverlayImg.color = full;
+
+            action();
+            yield return null; // Let the new screen's own layout/rebuild settle before revealing it.
+
+            t = 0f;
+            while (t < fadeTime)
+            {
+                t += Time.unscaledDeltaTime;
+                var c = _bigTransitionOverlayImg.color; c.a = Mathf.Lerp(1f, 0f, t / fadeTime); _bigTransitionOverlayImg.color = c;
+                yield return null;
+            }
+            var clear = _bigTransitionOverlayImg.color; clear.a = 0f; _bigTransitionOverlayImg.color = clear;
         }
 
         // ============================================================
@@ -2366,9 +2440,12 @@ namespace Talune.UI
             _endTurnButton = CreateButton(statsRowRT, "END TURN (Space)", OnEndTurnClicked, new Color(0.25f, 0.2f, 0.1f));
             AddLayoutElement(_endTurnButton.GetComponent<RectTransform>(), preferredWidth: 180, preferredHeight: 30);
 
-            // Player health bar - own row, just under the stats line.
+            // Player health bar - own row, just under the stats line. 16px tall (was 10) -
+            // thin enough at 10px to get lost next to the floating damage number/screen
+            // shake that already play on hit; this plus the punch-scale on damage (see
+            // OnEndTurnClicked) makes the bar itself impossible to miss when it moves.
             var playerBarBgRT = CreateUIObject("PlayerHealthBarBg", bottomBarRT);
-            AddLayoutElement(playerBarBgRT, preferredHeight: 10);
+            AddLayoutElement(playerBarBgRT, preferredHeight: 16);
             var playerBarBgImg = playerBarBgRT.gameObject.AddComponent<Image>();
             playerBarBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
             var playerBarFillRT = CreateUIObject("Fill", playerBarBgRT);
@@ -2382,6 +2459,7 @@ namespace Talune.UI
             _playerHpFill.fillOrigin = (int)Image.OriginHorizontal.Left;
             _playerHpFill.fillAmount = 1f;
             _playerHpFill.color = Color.green;
+            _playerHpBarRT = playerBarBgRT;
 
             var playerStatusRowRT = CreateUIObject("PlayerStatusRow", bottomBarRT);
             AddLayoutElement(playerStatusRowRT, preferredHeight: 20);
