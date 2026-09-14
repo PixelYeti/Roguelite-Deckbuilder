@@ -624,6 +624,29 @@ namespace Talune.UI
             return _roundFillSprite;
         }
 
+        private Sprite _glareSprite;
+
+        /// <summary>A soft vertical white band, generated once and cached - the card hover
+        /// sheen (see TrackCardTilt) rotates and slides an Image using this sprite rather
+        /// than needing an authored gradient asset.</summary>
+        private Sprite GetGlareSprite()
+        {
+            if (_glareSprite != null) return _glareSprite;
+            const int size = 64;
+            var tex = new Texture2D(size, 4, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            var pixels = new Color[size * 4];
+            for (int x = 0; x < size; x++)
+            {
+                float t = Mathf.Abs(x / (float)(size - 1) - 0.5f) * 2f; // 0 at center, 1 at edges.
+                float a = Mathf.Pow(Mathf.Clamp01(1f - t), 2.2f); // sharpened falloff so it reads as a streak, not a wash.
+                for (int y = 0; y < 4; y++) pixels[y * size + x] = new Color(1f, 1f, 1f, a);
+            }
+            tex.SetPixels(pixels);
+            tex.Apply();
+            _glareSprite = Sprite.Create(tex, new Rect(0, 0, size, 4), new Vector2(0.5f, 0.5f));
+            return _glareSprite;
+        }
+
         private static float MapNodeX(int index, int count)
         {
             if (count <= 1) return 0f;
@@ -2755,6 +2778,22 @@ namespace Talune.UI
             frameImg.raycastTarget = false;
             AddDropShadow(frameImg, new Vector2(6, -6));
 
+            // Glare sheen - a soft diagonal streak that sweeps across the card as the
+            // cursor moves, masked to the card's own bounds. Purely cosmetic (see
+            // TrackCardTilt, which drives its position/alpha alongside the tilt), zero
+            // alpha until hovered.
+            var glareMaskRT = CreateUIObject("GlareMask", visual);
+            StretchFull(glareMaskRT);
+            glareMaskRT.gameObject.AddComponent<RectMask2D>();
+            var glareRT = CreateUIObject("Glare", glareMaskRT);
+            glareRT.sizeDelta = new Vector2(260, 420);
+            glareRT.anchorMin = glareRT.anchorMax = new Vector2(0.5f, 0.5f);
+            glareRT.localRotation = Quaternion.Euler(0, 0, 25f);
+            var glareImg = glareRT.gameObject.AddComponent<Image>();
+            glareImg.sprite = GetGlareSprite();
+            glareImg.color = new Color(1f, 1f, 1f, 0f);
+            glareImg.raycastTarget = false;
+
             if (hotkeyNumber.HasValue)
             {
                 // Bottom-left, not top-right: cards overlap by ~35px on their RIGHT edge
@@ -2833,7 +2872,7 @@ namespace Talune.UI
             StretchFull(bodyText.rectTransform);
 
             btn.onClick.AddListener(() => onClick(visual));
-            AddHoverRaise(slot, visual, sortingCanvas);
+            AddHoverRaise(slot, visual, sortingCanvas, glareImg);
             StartCoroutine(CardEntranceAnimation(visual, entranceDelay));
             return btn;
         }
@@ -2866,7 +2905,7 @@ namespace Talune.UI
             if (visual != null) { visual.localScale = Vector3.one; visual.anchoredPosition = Vector2.zero; visual.localRotation = Quaternion.identity; }
         }
 
-        private void AddHoverRaise(RectTransform slot, RectTransform visual, Canvas sortingCanvas)
+        private void AddHoverRaise(RectTransform slot, RectTransform visual, Canvas sortingCanvas, Image glareImg = null)
         {
             var trigger = slot.gameObject.AddComponent<EventTrigger>();
 
@@ -2875,8 +2914,8 @@ namespace Talune.UI
             {
                 sortingCanvas.overrideSorting = true;
                 sortingCanvas.sortingOrder = 100;
-                StopAndStartTween(visual, TweenCard(visual, new Vector2(0, 24), new Vector3(1.12f, 1.12f, 1f)));
-                StopAndStartTilt(visual, TrackCardTilt(slot, visual));
+                StopAndStartTween(visual, TweenCard(visual, new Vector2(0, 40), new Vector3(1.2f, 1.2f, 1f)));
+                StopAndStartTilt(visual, TrackCardTilt(slot, visual, glareImg));
             });
             trigger.triggers.Add(enter);
 
@@ -2884,7 +2923,7 @@ namespace Talune.UI
             exit.callback.AddListener(_ =>
             {
                 StopAndStartTween(visual, TweenCardThenReset(visual, sortingCanvas));
-                StopAndStartTilt(visual, ResetTilt(visual));
+                StopAndStartTilt(visual, ResetTilt(visual, glareImg));
             });
             trigger.triggers.Add(exit);
         }
@@ -2919,10 +2958,13 @@ namespace Talune.UI
 
         /// <summary>Rotates `visual` to face the cursor's offset from `hitArea`'s center,
         /// for as long as this coroutine keeps running (the caller is responsible for
-        /// stopping it on PointerExit via StopAndStartTilt).</summary>
-        private IEnumerator TrackCardTilt(RectTransform hitArea, RectTransform visual)
+        /// stopping it on PointerExit via StopAndStartTilt). `glare`, when given (cards
+        /// only - see AddHoverRaise), slides a sheen across the card in step with the
+        /// cursor and fades it in, strongest toward the edges where the tilt itself
+        /// reads as most dramatic.</summary>
+        private IEnumerator TrackCardTilt(RectTransform hitArea, RectTransform visual, Image glare = null)
         {
-            const float maxTiltDegrees = 14f;
+            const float maxTiltDegrees = 26f;
             while (true)
             {
                 if (visual == null || hitArea == null) yield break;
@@ -2934,16 +2976,24 @@ namespace Talune.UI
                     float ny = Mathf.Clamp(local.y / (rect.height * 0.5f), -1f, 1f);
                     var targetRot = Quaternion.Euler(-ny * maxTiltDegrees, nx * maxTiltDegrees, 0f);
                     visual.localRotation = Quaternion.Slerp(visual.localRotation, targetRot, Time.unscaledDeltaTime * 14f);
+
+                    if (glare != null)
+                    {
+                        var glareRT = glare.rectTransform;
+                        glareRT.anchoredPosition = new Vector2(nx * 170f, 0f);
+                        var c = glare.color; c.a = Mathf.Lerp(c.a, 0.22f, Time.unscaledDeltaTime * 10f); glare.color = c;
+                    }
                 }
                 yield return null;
             }
         }
 
-        private static IEnumerator ResetTilt(RectTransform visual)
+        private static IEnumerator ResetTilt(RectTransform visual, Image glare = null)
         {
             const float duration = 0.15f;
             if (visual == null) yield break;
             Quaternion start = visual.localRotation;
+            float glareStartAlpha = glare != null ? glare.color.a : 0f;
             float t = 0f;
             while (t < duration)
             {
@@ -2951,6 +3001,7 @@ namespace Talune.UI
                 float p = Mathf.Clamp01(t / duration);
                 if (visual == null) yield break;
                 visual.localRotation = Quaternion.Slerp(start, Quaternion.identity, p);
+                if (glare != null) { var c = glare.color; c.a = Mathf.Lerp(glareStartAlpha, 0f, p); glare.color = c; }
                 yield return null;
             }
             if (visual != null) visual.localRotation = Quaternion.identity;
