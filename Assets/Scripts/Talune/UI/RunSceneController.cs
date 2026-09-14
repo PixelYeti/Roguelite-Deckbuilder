@@ -55,7 +55,7 @@ namespace Talune.UI
         private CombatManager _combat;
         private RewardNodeType _pendingRewardType;
         private readonly List<string> _logLines = new();
-        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow, Image intentIcon)> _enemyUI = new();
+        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow, Image intentIcon, Image hpChip)> _enemyUI = new();
 
         // Click-a-card-then-click-a-target flow: a card needing an enemy target waits
         // here until the player picks one (or cancels), rather than requiring a target
@@ -84,8 +84,10 @@ namespace Talune.UI
         // --- Shared chrome ---
         private Text _hudText;
         private Image _hudHpFill;
+        private Image _hudHpChip;
         private RectTransform _hudHpBarRT;
         private RectTransform _playerHpBarRT;
+        private Image _playerHpChip;
         private GameObject _root; // HUD + ScreenContainer together - hidden entirely behind the title screen until a run actually starts.
         private GameObject _screenContainer;
         private Transform _canvasTransform; // Parent for ephemeral overlays (Tutorial/Intro) that must render even while _root is hidden.
@@ -469,7 +471,7 @@ namespace Talune.UI
         private void RefreshHUD()
         {
             _hudText.text = $"Rook  HP {_player.CurrentHP}/{_player.MaxHP}    Fragments {_runState.Fragments}    Deck {_runState.Deck.Count}    Relics {_runState.Relics.Count}    Act {_actIndex + 1}/{ActCount}";
-            AnimateHealthBarFill(_hudHpFill, _player.CurrentHP, _player.MaxHP);
+            AnimateHealthBarFill(_hudHpFill, _player.CurrentHP, _player.MaxHP, _hudHpChip);
 
             if (_relicRow == null) return;
             for (int i = _relicRow.childCount - 1; i >= 0; i--) DestroyImmediate(_relicRow.GetChild(i).gameObject);
@@ -622,6 +624,28 @@ namespace Talune.UI
             tex.Apply();
             _roundFillSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
             return _roundFillSprite;
+        }
+
+        private Sprite _solidFillSprite;
+
+        /// <summary>A plain opaque white square, generated once and cached. Image.Type.Filled
+        /// silently ignores fillAmount and renders the whole rect when no sprite is assigned
+        /// - found by pixel-sampling an actual rendered health bar (its fillAmount value was
+        /// correct, but every pixel across the bar's full width came back the same "low HP"
+        /// red instead of transitioning to background color past the fill edge). Every
+        /// fillAmount-driven Image in this file needs a real sprite because of this, even a
+        /// trivial solid one - this is it.</summary>
+        private Sprite GetSolidFillSprite()
+        {
+            if (_solidFillSprite != null) return _solidFillSprite;
+            const int size = 4;
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            var pixels = new Color[size * size];
+            for (int i = 0; i < pixels.Length; i++) pixels[i] = Color.white;
+            tex.SetPixels(pixels);
+            tex.Apply();
+            _solidFillSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+            return _solidFillSprite;
         }
 
         private Sprite _glareSprite;
@@ -1405,7 +1429,7 @@ namespace Talune.UI
                     ? $"{enemy.DisplayName}\n(defeated)"
                     : (targetable ? "◆ CLICK TO TARGET ◆\n" : "") +
                       $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
-                if (ui.hpFill != null) AnimateHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP);
+                if (ui.hpFill != null) AnimateHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP, ui.hpChip);
                 RefreshStatusRow(ui.statusRow, enemy);
                 if (ui.intentIcon != null)
                 {
@@ -1464,7 +1488,7 @@ namespace Talune.UI
         {
             var p = _combat.Player;
             _playerStatsText.text = $"Rook   HP {p.CurrentHP}/{p.MaxHP}   Block {p.Block}   Energy {p.Energy}/{p.MaxEnergy}   Turn {_combat.TurnCount}";
-            AnimateHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP);
+            AnimateHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP, _playerHpChip);
             RefreshStatusRow(_playerStatusRow, p);
             RefreshEnemyPanels();
             RebuildHand();
@@ -1500,38 +1524,60 @@ namespace Talune.UI
 
         private readonly Dictionary<Image, Coroutine> _hpBarAnims = new();
 
-        /// <summary>Tweens fillAmount/color to the new HP fraction instead of snapping -
-        /// an instant cut landing in the same frame as a punch/flash/floating number (see
-        /// the damage-reaction code around OnEndTurnClicked and TryPlayCard) is easy to
-        /// read as "the bar didn't change" even though the value did, because nothing
-        /// draws the eye to the bar itself. Keyed by Image so a second hit before the
-        /// first tween finishes restarts cleanly from wherever the bar currently sits,
-        /// rather than fighting a stale coroutine.</summary>
-        private void AnimateHealthBarFill(Image fillImg, int current, int max)
+        /// <summary>Eases the main fill to the new HP fraction and, if `chipImg` is given,
+        /// drives a trailing "chip" sliver behind it - a plain fillAmount tween turned out
+        /// to still read as "the bar didn't change" for a lot of players (small hits move
+        /// a thin bar by only a few pixels, easy to miss even when it's technically
+        /// animating), so the chip makes the LOSS itself the loud, unmistakable part: it
+        /// holds at the old value for a beat, then bright yellow drains down to match,
+        /// visible only in the sliver between the new (shorter) fill and where the bar
+        /// used to be. Keyed by the main Image so a second hit before the first tween
+        /// finishes restarts cleanly instead of fighting a stale coroutine.</summary>
+        private void AnimateHealthBarFill(Image fillImg, int current, int max, Image chipImg = null)
         {
             if (fillImg == null) return;
             if (_hpBarAnims.TryGetValue(fillImg, out var existing) && existing != null) StopCoroutine(existing);
-            _hpBarAnims[fillImg] = StartCoroutine(AnimateHealthBarFillRoutine(fillImg, current, max));
+            _hpBarAnims[fillImg] = StartCoroutine(AnimateHealthBarFillRoutine(fillImg, chipImg, current, max));
         }
 
-        private static IEnumerator AnimateHealthBarFillRoutine(Image fillImg, int current, int max)
+        private static IEnumerator AnimateHealthBarFillRoutine(Image fillImg, Image chipImg, int current, int max)
         {
-            const float duration = 0.35f;
-            float from = fillImg.fillAmount;
             float to = max > 0 ? Mathf.Clamp01((float)current / max) : 0f;
-            Color fromColor = fillImg.color;
             Color toColor = HealthBarColor(to);
+
+            const float fillDuration = 0.15f; // Fast - the chip is what carries the "this just happened" read.
+            float fillFrom = fillImg.fillAmount;
+            Color fillFromColor = fillImg.color;
             float t = 0f;
-            while (t < duration)
+            while (t < fillDuration)
             {
                 t += Time.unscaledDeltaTime;
-                float p = Mathf.Clamp01(t / duration);
+                float p = Mathf.Clamp01(t / fillDuration);
                 if (fillImg == null) yield break;
-                fillImg.fillAmount = Mathf.Lerp(from, to, p);
-                fillImg.color = Color.Lerp(fromColor, toColor, p);
+                fillImg.fillAmount = Mathf.Lerp(fillFrom, to, p);
+                fillImg.color = Color.Lerp(fillFromColor, toColor, p);
                 yield return null;
             }
             if (fillImg != null) { fillImg.fillAmount = to; fillImg.color = toColor; }
+
+            if (chipImg == null) yield break;
+
+            const float chipHold = 0.15f;
+            const float chipDrain = 0.45f;
+            t = 0f;
+            while (t < chipHold) { t += Time.unscaledDeltaTime; yield return null; }
+
+            float chipFrom = chipImg.fillAmount;
+            t = 0f;
+            while (t < chipDrain)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / chipDrain);
+                if (chipImg == null) yield break;
+                chipImg.fillAmount = Mathf.Lerp(chipFrom, to, p);
+                yield return null;
+            }
+            if (chipImg != null) chipImg.fillAmount = to;
         }
 
         private static string DescribeIntent(EnemyIntent intent) => intent.Category switch
@@ -1606,12 +1652,32 @@ namespace Talune.UI
                 var barBgImg = barBgRT.gameObject.AddComponent<Image>();
                 barBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
                 barBgImg.raycastTarget = false;
+                // Chip - a bright trailing sliver showing exactly how much HP was just lost
+                // (behind Fill, so it only peeks out between Fill's new edge and its own,
+                // slower-draining edge - see AnimateHealthBarFill). A same-frame fillAmount
+                // snap was too easy to miss at a glance; this makes the LOSS itself the
+                // most visually loud thing on the bar, not just the resulting width.
+                var barChipRT = CreateUIObject("HealthBarChip", barBgRT);
+                barChipRT.anchorMin = Vector2.zero;
+                barChipRT.anchorMax = Vector2.one;
+                barChipRT.offsetMin = new Vector2(2, 2);
+                barChipRT.offsetMax = new Vector2(-2, -2);
+                var hpChipImg = barChipRT.gameObject.AddComponent<Image>();
+                hpChipImg.sprite = GetSolidFillSprite();
+                hpChipImg.type = Image.Type.Filled;
+                hpChipImg.fillMethod = Image.FillMethod.Horizontal;
+                hpChipImg.fillOrigin = (int)Image.OriginHorizontal.Left;
+                hpChipImg.fillAmount = 1f;
+                hpChipImg.color = new Color(1f, 0.92f, 0.35f);
+                hpChipImg.raycastTarget = false;
+
                 var barFillRT = CreateUIObject("HealthBarFill", barBgRT);
                 barFillRT.anchorMin = Vector2.zero;
                 barFillRT.anchorMax = Vector2.one;
                 barFillRT.offsetMin = new Vector2(2, 2);
                 barFillRT.offsetMax = new Vector2(-2, -2);
                 var hpFillImg = barFillRT.gameObject.AddComponent<Image>();
+                hpFillImg.sprite = GetSolidFillSprite();
                 hpFillImg.type = Image.Type.Filled;
                 hpFillImg.fillMethod = Image.FillMethod.Horizontal;
                 hpFillImg.fillOrigin = (int)Image.OriginHorizontal.Left;
@@ -1685,7 +1751,7 @@ namespace Talune.UI
                     StretchFull(tierText.rectTransform);
                 }
 
-                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT, intentIconImg);
+                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT, intentIconImg, hpChipImg);
             }
         }
 
@@ -2083,12 +2149,26 @@ namespace Talune.UI
             hudHpBarBgRT.anchoredPosition = new Vector2(10, 0);
             var hudHpBarBgImg = hudHpBarBgRT.gameObject.AddComponent<Image>();
             hudHpBarBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
+            var hudChipRT = CreateUIObject("Chip", hudHpBarBgRT);
+            hudChipRT.anchorMin = Vector2.zero;
+            hudChipRT.anchorMax = Vector2.one;
+            hudChipRT.offsetMin = new Vector2(1, 1);
+            hudChipRT.offsetMax = new Vector2(-1, -1);
+            _hudHpChip = hudChipRT.gameObject.AddComponent<Image>();
+            _hudHpChip.sprite = GetSolidFillSprite();
+            _hudHpChip.type = Image.Type.Filled;
+            _hudHpChip.fillMethod = Image.FillMethod.Horizontal;
+            _hudHpChip.fillOrigin = (int)Image.OriginHorizontal.Left;
+            _hudHpChip.fillAmount = 1f;
+            _hudHpChip.color = new Color(1f, 0.92f, 0.35f);
+            _hudHpChip.raycastTarget = false;
             var hudHpBarFillRT = CreateUIObject("Fill", hudHpBarBgRT);
             hudHpBarFillRT.anchorMin = Vector2.zero;
             hudHpBarFillRT.anchorMax = Vector2.one;
             hudHpBarFillRT.offsetMin = new Vector2(1, 1);
             hudHpBarFillRT.offsetMax = new Vector2(-1, -1);
             _hudHpFill = hudHpBarFillRT.gameObject.AddComponent<Image>();
+            _hudHpFill.sprite = GetSolidFillSprite();
             _hudHpFill.type = Image.Type.Filled;
             _hudHpFill.fillMethod = Image.FillMethod.Horizontal;
             _hudHpFill.fillOrigin = (int)Image.OriginHorizontal.Left;
@@ -2471,6 +2551,12 @@ namespace Talune.UI
             var enemyRowLayout = enemyRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
             enemyRowLayout.spacing = 16;
             enemyRowLayout.childAlignment = TextAnchor.MiddleCenter;
+            // HorizontalLayoutGroup defaults childForceExpandWidth to true - with only 1-2
+            // enemies (the common case) that stretched each panel to fill the whole row
+            // instead of respecting its preferredWidth, which is what made the health-bar
+            // sprite bug below so easy to spot (a bar over 1000px wide highlighted it
+            // immediately - see GetSolidFillSprite).
+            enemyRowLayout.childForceExpandWidth = false;
             _enemyRow = enemyRowRT;
 
             var logPanelRT = CreateUIObject("LogPanel", screen);
@@ -2511,12 +2597,26 @@ namespace Talune.UI
             AddLayoutElement(playerBarBgRT, preferredHeight: 16);
             var playerBarBgImg = playerBarBgRT.gameObject.AddComponent<Image>();
             playerBarBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
+            var playerChipRT = CreateUIObject("Chip", playerBarBgRT);
+            playerChipRT.anchorMin = Vector2.zero;
+            playerChipRT.anchorMax = Vector2.one;
+            playerChipRT.offsetMin = new Vector2(2, 2);
+            playerChipRT.offsetMax = new Vector2(-2, -2);
+            _playerHpChip = playerChipRT.gameObject.AddComponent<Image>();
+            _playerHpChip.sprite = GetSolidFillSprite();
+            _playerHpChip.type = Image.Type.Filled;
+            _playerHpChip.fillMethod = Image.FillMethod.Horizontal;
+            _playerHpChip.fillOrigin = (int)Image.OriginHorizontal.Left;
+            _playerHpChip.fillAmount = 1f;
+            _playerHpChip.color = new Color(1f, 0.92f, 0.35f);
+            _playerHpChip.raycastTarget = false;
             var playerBarFillRT = CreateUIObject("Fill", playerBarBgRT);
             playerBarFillRT.anchorMin = Vector2.zero;
             playerBarFillRT.anchorMax = Vector2.one;
             playerBarFillRT.offsetMin = new Vector2(2, 2);
             playerBarFillRT.offsetMax = new Vector2(-2, -2);
             _playerHpFill = playerBarFillRT.gameObject.AddComponent<Image>();
+            _playerHpFill.sprite = GetSolidFillSprite();
             _playerHpFill.type = Image.Type.Filled;
             _playerHpFill.fillMethod = Image.FillMethod.Horizontal;
             _playerHpFill.fillOrigin = (int)Image.OriginHorizontal.Left;
