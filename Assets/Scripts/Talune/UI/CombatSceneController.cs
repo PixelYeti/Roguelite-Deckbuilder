@@ -211,32 +211,53 @@ namespace Talune.UI
             }
         }
 
-        /// <summary>Builds one hand card as actual card art: the generated frame as the
-        /// full background (tinted grey when unaffordable), a type illustration filling
-        /// the upper parchment area, a colored type-tag strip, a round cost gem in the
-        /// corner, and name/description text below the art. Also wired for a hover-raise
-        /// (EventTrigger) so the hand doesn't sit dead-flat.</summary>
+        /// <summary>
+        /// Builds one hand card as two layers, deliberately kept separate:
+        ///  - "Slot": the LayoutElement-sized object actually sitting in the
+        ///    HorizontalLayoutGroup. Owns the Button/EventTrigger (hit-testing) and NEVER
+        ///    moves, scales, or reorders. This is what keeps hover stable.
+        ///  - "Visual" (child, stretched to fill Slot at rest): everything you actually
+        ///    see - frame art, illustration, type tag, cost gem, text - and the only
+        ///    thing the hover tween touches (position/scale/render-order).
+        /// An earlier version animated AND reordered the Slot object itself, which lives
+        /// inside a HorizontalLayoutGroup - calling SetAsLastSibling() on a layout child
+        /// makes the LAYOUT immediately reflow it to a new slot, fighting the position
+        /// tween and shoving neighboring cards under the cursor, which re-triggers their
+        /// own hover, which reorders again... a runaway loop ("going crazy" on hover).
+        /// Splitting slot from visual means nothing ever moves the object the layout
+        /// controls, and "pop to front" uses a render-order override instead of
+        /// hierarchy reordering, so it can't disturb the layout at all.
+        /// </summary>
         private void CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction onClick)
         {
-            var rt = CreateUIObject(card.CardName, parent);
-            AddLayoutElement(rt, preferredWidth: 150, preferredHeight: 210);
+            var slot = CreateUIObject(card.CardName, parent);
+            AddLayoutElement(slot, preferredWidth: 150, preferredHeight: 210);
 
-            var frameImg = rt.gameObject.AddComponent<Image>();
+            var hitArea = slot.gameObject.AddComponent<Image>();
+            hitArea.color = new Color(0, 0, 0, 0); // Invisible - the Visual child does all the rendering.
+
+            var btn = slot.gameObject.AddComponent<Button>();
+            btn.targetGraphic = hitArea;
+            btn.interactable = affordable;
+            btn.onClick.AddListener(onClick);
+
+            var visual = CreateUIObject("Visual", slot);
+            StretchFull(visual);
+            var sortingCanvas = visual.gameObject.AddComponent<Canvas>(); // overrideSorting toggled on hover - see AddHoverRaise.
+            sortingCanvas.overrideSorting = false;
+
+            var frameImg = visual.gameObject.AddComponent<Image>();
             frameImg.sprite = _cardFrameSprite; // Null-safe: Image just renders as a flat white/tinted rect if no sprite was generated/found.
             frameImg.color = affordable ? Color.white : CardUnaffordableTint;
             frameImg.type = Image.Type.Simple;
-
-            var btn = rt.gameObject.AddComponent<Button>();
-            btn.targetGraphic = frameImg;
-            btn.interactable = affordable;
-            btn.onClick.AddListener(onClick);
+            frameImg.raycastTarget = false; // The Slot's hitArea handles all hit-testing.
 
             // Illustration, filling most of the upper parchment area - this is the single
             // biggest thing that makes it read as a "card" instead of a text button.
             var icon = GetCardIcon(card.Type);
             if (icon != null)
             {
-                var iconRT = CreateUIObject("Icon", rt);
+                var iconRT = CreateUIObject("Icon", visual);
                 iconRT.anchorMin = new Vector2(0.20f, 0.50f);
                 iconRT.anchorMax = new Vector2(0.80f, 0.86f);
                 iconRT.offsetMin = Vector2.zero;
@@ -249,7 +270,7 @@ namespace Talune.UI
             }
 
             // Type tag strip along the top edge, inside the frame's border.
-            var tagRT = CreateUIObject("TypeTag", rt);
+            var tagRT = CreateUIObject("TypeTag", visual);
             tagRT.anchorMin = new Vector2(0.14f, 0.87f);
             tagRT.anchorMax = new Vector2(0.86f, 0.95f);
             tagRT.offsetMin = Vector2.zero;
@@ -263,7 +284,7 @@ namespace Talune.UI
 
             // Cost gem - a round badge in the top-left corner, standard genre convention
             // for "this is what it costs" instead of a plain text line.
-            var gemRT = CreateUIObject("CostGem", rt);
+            var gemRT = CreateUIObject("CostGem", visual);
             gemRT.anchorMin = new Vector2(0f, 0.90f);
             gemRT.anchorMax = new Vector2(0f, 0.90f);
             gemRT.pivot = new Vector2(0.5f, 0.5f);
@@ -278,7 +299,7 @@ namespace Talune.UI
             StretchFull(gemText.rectTransform);
 
             // Name + description on the parchment area below the illustration.
-            var bodyRT = CreateUIObject("Body", rt);
+            var bodyRT = CreateUIObject("Body", visual);
             bodyRT.anchorMin = new Vector2(0.14f, 0.08f);
             bodyRT.anchorMax = new Vector2(0.86f, 0.49f);
             bodyRT.offsetMin = Vector2.zero;
@@ -288,36 +309,41 @@ namespace Talune.UI
             bodyText.raycastTarget = false;
             StretchFull(bodyText.rectTransform);
 
-            AddHoverRaise(rt);
+            AddHoverRaise(slot, visual, sortingCanvas);
         }
 
-        /// <summary>Hooks pointer-enter/exit so a hand card lifts and enlarges slightly
-        /// under the cursor and pops in front of its neighbors - the hand was previously
-        /// a dead-flat static row, which read more like a toolbar than a hand of cards.
-        /// Only the Y offset and scale are tweened (never X) since a HorizontalLayoutGroup
-        /// owns each card's X position - fighting that would fling cards sideways.</summary>
-        private void AddHoverRaise(RectTransform cardRT)
+        /// <summary>Hooks pointer-enter/exit on the STABLE slot to lift/enlarge the
+        /// animated visual child and render it above its neighbors - see the big comment
+        /// on CreateCardButton for why hit-testing and animation are on different objects.</summary>
+        private void AddHoverRaise(RectTransform slot, RectTransform visual, Canvas sortingCanvas)
         {
-            // Captured on the first hover, once the layout group has already placed this
-            // card - every subsequent enter/exit lifts from and returns to this same spot.
-            Vector2? basePos = null;
-            var trigger = cardRT.gameObject.AddComponent<EventTrigger>();
+            var trigger = slot.gameObject.AddComponent<EventTrigger>();
 
             var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
             enter.callback.AddListener(_ =>
             {
-                basePos ??= cardRT.anchoredPosition;
-                cardRT.SetAsLastSibling();
-                StopAndStartTween(cardRT, TweenCard(cardRT, basePos.Value + new Vector2(0, 24), new Vector3(1.12f, 1.12f, 1f)));
+                sortingCanvas.overrideSorting = true;
+                sortingCanvas.sortingOrder = 100; // Render above every other card without touching hierarchy/layout order.
+                StopAndStartTween(visual, TweenCard(visual, new Vector2(0, 24), new Vector3(1.12f, 1.12f, 1f)));
             });
             trigger.triggers.Add(enter);
 
             var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
             exit.callback.AddListener(_ =>
             {
-                if (basePos.HasValue) StopAndStartTween(cardRT, TweenCard(cardRT, basePos.Value, Vector3.one));
+                StopAndStartTween(visual, TweenCardThenReset(visual, sortingCanvas));
             });
             trigger.triggers.Add(exit);
+        }
+
+        /// <summary>Tweens the visual back to rest, then turns off sorting override only
+        /// once it's actually back at its normal position - turning it off immediately
+        /// would let a neighbor's Visual (still at overrideSorting=false, default order)
+        /// draw over this one mid-animation.</summary>
+        private IEnumerator TweenCardThenReset(RectTransform visual, Canvas sortingCanvas)
+        {
+            yield return TweenCard(visual, Vector2.zero, Vector3.one);
+            if (sortingCanvas != null) sortingCanvas.overrideSorting = false;
         }
 
         private readonly Dictionary<RectTransform, Coroutine> _activeTweens = new();
