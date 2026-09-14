@@ -18,43 +18,142 @@ namespace Talune.Content
     public static class DefaultContent
     {
         // --- Cards ---
+        // Each factory is followed by its upgrade (CARD UPGRADES: "improve identity,
+        // not only damage values" - Static Fang+ and Bubble Guard+ change what the card
+        // DOES; most Neutral filler just gets numerically better, matching genre norm
+        // for plain basics).
 
-        public static CardData BasicAttack() => MakeCard("Basic Attack",
+        public static CardData BasicAttack() => WithUpgrade(MakeCard("Basic Attack",
             "Deal 6 damage.", CardType.Attack, KinType.None, BaselineNumbers.BasicAttackCost,
-            CardEffect.Damage(TargetType.SingleEnemy, BaselineNumbers.BasicAttackDamage));
+            CardEffect.Damage(TargetType.SingleEnemy, BaselineNumbers.BasicAttackDamage)),
+            "Deal 9 damage.", CardEffect.Damage(TargetType.SingleEnemy, 9));
 
-        public static CardData BasicGuard() => MakeCard("Basic Guard",
+        public static CardData BasicGuard() => WithUpgrade(MakeCard("Basic Guard",
             "Gain 5 Block.", CardType.Guard, KinType.None, BaselineNumbers.BasicGuardCost,
-            CardEffect.Block(BaselineNumbers.BasicGuardBlock));
+            CardEffect.Block(BaselineNumbers.BasicGuardBlock)),
+            "Gain 8 Block.", CardEffect.Block(8));
 
-        public static CardData Quickstep() => MakeCard("Quickstep",
+        public static CardData Quickstep() => WithUpgrade(MakeCard("Quickstep",
             "Draw 1 card. (Movement/utility starter card - Voltrix flavor, no literal repositioning; see the addendum's 'movement is not a spatial system' note.)",
             CardType.Skill, KinType.None, 0,
-            CardEffect.DrawCards(1));
+            CardEffect.DrawCards(1)),
+            "Draw 2 cards.", CardEffect.DrawCards(2));
 
-        public static CardData StaticFang() => MakeCard("Static Fang",
+        public static CardData StaticFang() => WithUpgrade(MakeCard("Static Fang",
             "Deal 6 damage. Chain lightning once.", CardType.Attack, KinType.Voltrix, 1,
             CardEffect.Damage(TargetType.SingleEnemy, 6),
-            CardEffect.Damage(TargetType.SecondEnemy, 6));
+            CardEffect.Damage(TargetType.SecondEnemy, 6)),
+            "Deal 6 damage. Chain lightning twice.", // Verbatim from the master prompt's own CARD UPGRADES example.
+            CardEffect.Damage(TargetType.SingleEnemy, 6), CardEffect.Damage(TargetType.SecondEnemy, 6), CardEffect.Damage(TargetType.SecondEnemy, 6));
 
-        public static CardData BubbleGuard() => MakeCard("Bubble Guard",
+        public static CardData BubbleGuard() => WithUpgrade(MakeCard("Bubble Guard",
             "Gain 8 Block.", CardType.Guard, KinType.Bubblo, 1,
-            CardEffect.Block(8));
+            CardEffect.Block(8)),
+            "Gain 8 Block. Gain 1 Illusion token.",
+            CardEffect.Block(8), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Illusion, 1));
 
-        public static CardData RootStrike() => MakeCard("Root Strike",
+        public static CardData RootStrike() => WithUpgrade(MakeCard("Root Strike",
             "Deal 5 damage. Gain 1 Growth.", CardType.Attack, KinType.Mossmaw, 1,
             CardEffect.Damage(TargetType.SingleEnemy, 5),
-            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 1));
+            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 1)),
+            "Deal 5 damage. Gain 2 Growth.",
+            CardEffect.Damage(TargetType.SingleEnemy, 5), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 2));
+
+        // --- Bubblo filler (Water/Support: protection, healing, shields, cleansing) ---
+
+        public static CardData FoamShield() => WithUpgrade(MakeCard("Foam Shield",
+            "Gain 9 Block.", CardType.Guard, KinType.Bubblo, 1, CardEffect.Block(9)),
+            "Gain 13 Block.", CardEffect.Block(13));
+
+        public static CardData RefreshingRain() => WithUpgrade(MakeCard("Refreshing Rain",
+            "Heal 8. Draw 1 card.", CardType.Skill, KinType.Bubblo, 2,
+            CardEffect.Heal(8), CardEffect.DrawCards(1)),
+            "Heal 12. Draw 1 card.", CardEffect.Heal(12), CardEffect.DrawCards(1));
+
+        public static CardData BubbleBurst() => WithUpgrade(MakeCard("Bubble Burst",
+            "Deal 5 damage to all enemies.", CardType.Attack, KinType.Bubblo, 2,
+            CardEffect.Damage(TargetType.AllEnemies, 5)),
+            "Deal 8 damage to all enemies.", CardEffect.Damage(TargetType.AllEnemies, 8));
+
+        public static CardData TidalPush() => WithUpgrade(MakeCard("Tidal Push",
+            "Deal 4 damage. Gain 4 Block.", CardType.Attack, KinType.Bubblo, 1,
+            CardEffect.Damage(TargetType.SingleEnemy, 4), CardEffect.Block(4)),
+            "Deal 6 damage. Gain 6 Block.",
+            CardEffect.Damage(TargetType.SingleEnemy, 6), CardEffect.Block(6));
+
+        // --- Voltrix filler (Speed/Lightning: chaining, multi-hit, draw, energy) ---
+
+        public static CardData ChainSpark() => WithUpgrade(MakeCard("Chain Spark",
+            "Deal 4 damage to all enemies.", CardType.Attack, KinType.Voltrix, 2,
+            CardEffect.Damage(TargetType.AllEnemies, 4)),
+            "Deal 6 damage to all enemies.", CardEffect.Damage(TargetType.AllEnemies, 6));
+
+        public static CardData Overcharge() => WithUpgrade(MakeCard("Overcharge",
+            "Gain 1 Energy. Draw 1 card.", CardType.Skill, KinType.Voltrix, 1,
+            CardEffect.GainEnergy(1), CardEffect.DrawCards(1)),
+            "Gain 1 Energy. Draw 2 cards.", CardEffect.GainEnergy(1), CardEffect.DrawCards(2));
+
+        public static CardData Thunderbolt() => WithUpgrade(MakeCard("Thunderbolt",
+            "Deal 12 damage.", CardType.Attack, KinType.Voltrix, 2,
+            CardEffect.Damage(TargetType.SingleEnemy, 12)),
+            "Deal 17 damage.", CardEffect.Damage(TargetType.SingleEnemy, 17));
+
+        // --- Mossmaw filler (Strength/Nature: roots, thorns, growth, regeneration) ---
+
+        public static CardData BrambleSlam() => WithUpgrade(MakeCard("Bramble Slam",
+            "Deal 9 damage. Gain 2 Thorns.", CardType.Attack, KinType.Mossmaw, 2,
+            CardEffect.Damage(TargetType.SingleEnemy, 9), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 2)),
+            "Deal 13 damage. Gain 2 Thorns.",
+            CardEffect.Damage(TargetType.SingleEnemy, 13), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 2));
+
+        public static CardData Overgrowth() => WithUpgrade(MakeCard("Overgrowth",
+            "Gain 3 Growth.", CardType.Power, KinType.Mossmaw, 1,
+            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 3)),
+            "Gain 5 Growth.", CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 5));
+
+        public static CardData ThornGuard() => WithUpgrade(MakeCard("Thorn Guard",
+            "Gain 6 Block. Gain 1 Thorns.", CardType.Guard, KinType.Mossmaw, 1,
+            CardEffect.Block(6), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 1)),
+            "Gain 9 Block. Gain 2 Thorns.",
+            CardEffect.Block(9), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 2));
+
+        public static CardData Seedburst() => WithUpgrade(MakeCard("Seedburst",
+            "Deal 6 damage. Heal 3.", CardType.Attack, KinType.Mossmaw, 2,
+            CardEffect.Damage(TargetType.SingleEnemy, 6), CardEffect.Heal(3)),
+            "Deal 9 damage. Heal 5.",
+            CardEffect.Damage(TargetType.SingleEnemy, 9), CardEffect.Heal(5));
+
+        // --- Neutral filler (rounds out the Skill/Attack/Guard categories) ---
+
+        public static CardData SecondWind() => WithUpgrade(MakeCard("Second Wind",
+            "Heal 4.", CardType.Skill, KinType.None, 1, CardEffect.Heal(4)),
+            "Heal 7.", CardEffect.Heal(7));
+
+        public static CardData Focus() => WithUpgrade(MakeCard("Focus",
+            "Draw 2 cards.", CardType.Skill, KinType.None, 1, CardEffect.DrawCards(2)),
+            "Draw 3 cards.", CardEffect.DrawCards(3));
+
+        public static CardData TwinStrike() => WithUpgrade(MakeCard("Twin Strike",
+            "Deal 3 damage twice.", CardType.Attack, KinType.None, 1,
+            CardEffect.Damage(TargetType.SingleEnemy, 3), CardEffect.Damage(TargetType.SingleEnemy, 3)),
+            "Deal 4 damage twice.",
+            CardEffect.Damage(TargetType.SingleEnemy, 4), CardEffect.Damage(TargetType.SingleEnemy, 4));
+
+        public static CardData Bulwark() => WithUpgrade(MakeCard("Bulwark",
+            "Gain 12 Block.", CardType.Guard, KinType.None, 2, CardEffect.Block(12)),
+            "Gain 17 Block.", CardEffect.Block(17));
 
         /// <summary>Fix 1: Voltrix+Mossmaw hybrid, prototype-required. Simplified to a
         /// one-shot resolution (gain Thorns, immediately discharge it as bonus lightning
         /// damage) rather than the full passive "Thorns always discharge on trigger" rule,
         /// which needs a reactive-trigger system this vertical slice doesn't have yet.</summary>
-        public static CardData Stormroot() => MakeCard("Stormroot",
+        public static CardData Stormroot() => WithUpgrade(MakeCard("Stormroot",
             "Gain 2 Thorns. Deal 2 lightning damage to a second enemy.",
             CardType.Hybrid, new List<KinType> { KinType.Voltrix, KinType.Mossmaw }, 2,
             CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 2),
-            CardEffect.Damage(TargetType.SecondEnemy, 2));
+            CardEffect.Damage(TargetType.SecondEnemy, 2)),
+            "Gain 3 Thorns. Deal 4 lightning damage to a second enemy.",
+            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 3), CardEffect.Damage(TargetType.SecondEnemy, 4));
 
         public static List<CardData> BuildStarterDeck()
         {
@@ -70,21 +169,29 @@ namespace Talune.Content
         /// bubbled enemies"). Simplified the same way as Stormroot: a one-shot resolution
         /// (Block + a lightning hit that reaches a second enemy) rather than a passive
         /// always-on conduction rule.</summary>
-        public static CardData Stormwater() => MakeCard("Stormwater",
+        public static CardData Stormwater() => WithUpgrade(MakeCard("Stormwater",
             "Gain 6 Block. Deal 5 lightning damage to a second enemy.",
             CardType.Hybrid, new List<KinType> { KinType.Bubblo, KinType.Voltrix }, 2,
             CardEffect.Block(6),
-            CardEffect.Damage(TargetType.SecondEnemy, 5));
+            CardEffect.Damage(TargetType.SecondEnemy, 5)),
+            "Gain 9 Block. Deal 8 lightning damage to a second enemy.",
+            CardEffect.Block(9), CardEffect.Damage(TargetType.SecondEnemy, 8));
 
         /// <summary>Fix 1: Bubblo+Mossmaw hybrid ("healing causes plants/roots to grow").</summary>
-        public static CardData Bloomtide() => MakeCard("Bloomtide",
+        public static CardData Bloomtide() => WithUpgrade(MakeCard("Bloomtide",
             "Heal 5. Gain 2 Growth.", CardType.Hybrid, new List<KinType> { KinType.Bubblo, KinType.Mossmaw }, 2,
             CardEffect.Heal(5),
-            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 2));
+            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 2)),
+            "Heal 8. Gain 3 Growth.",
+            CardEffect.Heal(8), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 3));
 
         public static List<CardData> BuildRewardPool() => new()
         {
             StaticFang(), BubbleGuard(), RootStrike(), Stormroot(), Stormwater(), Bloomtide(),
+            FoamShield(), RefreshingRain(), BubbleBurst(), TidalPush(),
+            ChainSpark(), Overcharge(), Thunderbolt(),
+            BrambleSlam(), Overgrowth(), ThornGuard(), Seedburst(),
+            SecondWind(), Focus(), TwinStrike(), Bulwark(),
         };
 
         // --- Relics (Fix: "modify rules, not flat bonuses" - see RelicEffectKind) ---
@@ -123,6 +230,13 @@ namespace Talune.Content
             card.KinTags = kinTags;
             card.EnergyCost = cost;
             card.Effects = new List<CardEffect>(effects);
+            return card;
+        }
+
+        private static CardData WithUpgrade(CardData card, string upgradedDescription, params CardEffect[] upgradedEffects)
+        {
+            card.UpgradedDescription = upgradedDescription;
+            card.UpgradedEffects = new List<CardEffect>(upgradedEffects);
             return card;
         }
 

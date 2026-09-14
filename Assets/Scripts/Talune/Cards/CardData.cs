@@ -19,7 +19,27 @@ namespace Talune.Cards
         [Range(0, 3)] public int EnergyCost;
         public List<CardEffect> Effects = new();
 
+        // Upgrade (CARD UPGRADES: "cards can normally be upgraded once... upgrade
+        // mechanics, not only damage values"). Left empty (UpgradedEffects.Count == 0)
+        // for a card with no authored upgrade yet - CanUpgrade guards against that.
+        public bool IsUpgraded { get; private set; }
+        public string UpgradedName;
+        [TextArea] public string UpgradedDescription;
+        public List<CardEffect> UpgradedEffects = new();
+
         public bool IsNeutral => KinTags.Count == 0;
+        public bool CanUpgrade => !IsUpgraded && UpgradedEffects.Count > 0;
+
+        /// <returns>false if already upgraded or no upgrade is authored for this card.</returns>
+        public bool TryUpgrade()
+        {
+            if (!CanUpgrade) return false;
+            CardName = string.IsNullOrEmpty(UpgradedName) ? CardName + "+" : UpgradedName;
+            if (!string.IsNullOrEmpty(UpgradedDescription)) Description = UpgradedDescription;
+            Effects = new List<CardEffect>(UpgradedEffects);
+            IsUpgraded = true;
+            return true;
+        }
 
         private void OnValidate()
         {

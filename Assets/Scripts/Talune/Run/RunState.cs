@@ -18,6 +18,10 @@ namespace Talune.Run
         public List<RelicData> Relics { get; } = new();
         public int Fragments { get; private set; }
 
+        /// <summary>Fix 11: card removal price increases with each purchase in a run
+        /// "so it can't be spammed" - KipShop.CurrentRemovalPrice reads this.</summary>
+        public int RemovalsPurchasedThisRun { get; set; }
+
         public void AddFragments(int amount) => Fragments += System.Math.Max(0, amount);
 
         /// <returns>false if the player can't afford it - nothing is spent.</returns>
