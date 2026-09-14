@@ -78,7 +78,9 @@ namespace Talune.UI
 
         // --- Shared chrome ---
         private Text _hudText;
+        private GameObject _root; // HUD + ScreenContainer together - hidden entirely behind the title screen until a run actually starts.
         private GameObject _screenContainer;
+        private Transform _canvasTransform; // Parent for ephemeral overlays (Tutorial/Intro) that must render even while _root is hidden.
         private readonly Dictionary<string, GameObject> _screens = new();
         private Camera _uiCamera;
         private RectTransform _backgroundRT;
@@ -87,6 +89,18 @@ namespace Talune.UI
         private Text _relicTooltipText;
         private Font _pixelFont;
         private AudioSource _musicSource;
+        private AudioClip _explorationMusicClip;
+        private AudioClip _titleMusicClip;
+        private GameObject _titleScreenGO;
+        private const string IntroSeenKey = "Talune_SeenIntro";
+
+        private static readonly string[] IntroPages =
+        {
+            "Talune is dying.\n\nFractures spread through its biomes, and the being at their heart - Vorath - hungers to unmake it all.",
+            "You are Rook, wielding fragments of Talune's untamed Kin: Bubblo's tides, Voltrix's storms, Mossmaw's roots.",
+            "Build your strength as you delve. Every card you take and every relic you find shapes what you become - for this run, and beyond it.",
+            "Fall, and the run ends - but Essence carries forward. What you learn is never entirely lost.\n\nFind Vorath. End the Fracture.",
+        };
         private Image _transitionOverlayImg;
         private Transform _playerStatusRow;
         private Transform _relicRow;
@@ -165,6 +179,7 @@ namespace Talune.UI
         private Sprite _mapBackgroundSprite;
         private Sprite _act2BackgroundSprite;
         private Sprite _act3BackgroundSprite;
+        private Sprite _titleArtSprite;
         private Sprite _panelFrameSprite;
         private Sprite _buttonFrameSprite;
         private Sprite _mapNodeFrameSprite;
@@ -222,6 +237,7 @@ namespace Talune.UI
             _mapBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/MapBackground");
             _act2BackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/Act2Background");
             _act3BackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/Act3Background");
+            _titleArtSprite = Resources.Load<Sprite>("Art/Backgrounds/TitleArt");
             _panelFrameSprite = Resources.Load<Sprite>("Art/UI/PanelFrame");
             _buttonFrameSprite = Resources.Load<Sprite>("Art/UI/ButtonFrame");
             _mapNodeFrameSprite = Resources.Load<Sprite>("Art/UI/MapNodeFrame");
@@ -234,11 +250,11 @@ namespace Talune.UI
             _musicSource.playOnAwake = false;
             _musicSource.loop = true;
             _musicSource.volume = 0.35f; // Ambient bed, not meant to compete with SFX or the log.
-            var musicClip = Resources.Load<AudioClip>("Audio/Music/ForestAmbient");
-            if (musicClip != null) { _musicSource.clip = musicClip; _musicSource.Play(); }
+            _explorationMusicClip = Resources.Load<AudioClip>("Audio/Music/ForestAmbient");
+            _titleMusicClip = Resources.Load<AudioClip>("Audio/Music/TitleTheme");
 
             BuildUI();
-            StartNewRun();
+            ShowTitleScreen(); // Loading in used to drop straight into a run with no menu at all.
         }
 
         /// <summary>Hotkeys: 1-9 play the corresponding hand card (or, if it needs a
@@ -252,6 +268,7 @@ namespace Talune.UI
 
             if (kb.escapeKey.wasPressedThisFrame)
             {
+                if (_root == null || !_root.activeSelf) return; // No run in progress (title/intro/tutorial) - nothing to pause.
                 bool inCombat = _combat != null && _combat.Outcome == CombatOutcome.Ongoing
                     && _screens.TryGetValue("Combat", out var cs) && cs.activeSelf;
                 if (inCombat && _pendingCard != null) { CancelPendingTarget(); return; }
@@ -309,8 +326,89 @@ namespace Talune.UI
         // Run lifecycle
         // ============================================================
 
+        private void ShowTitleScreen()
+        {
+            if (_root != null) _root.SetActive(false); // Loading in used to drop straight into the map with no menu at all.
+            if (_titleMusicClip != null && _musicSource.clip != _titleMusicClip)
+            {
+                _musicSource.clip = _titleMusicClip;
+                _musicSource.Play();
+            }
+            if (_titleScreenGO != null) _titleScreenGO.SetActive(true);
+        }
+
+        private void OnNewRunClicked()
+        {
+            if (PlayerPrefs.GetInt(IntroSeenKey, 0) == 0)
+            {
+                PlayerPrefs.SetInt(IntroSeenKey, 1);
+                PlayerPrefs.Save();
+                ShowIntroPage(0, StartNewRun);
+            }
+            else
+            {
+                StartNewRun();
+            }
+        }
+
+        /// <summary>One page of the narrative intro, chained via `onFinish` rather than a
+        /// tracked page-index field - SKIP jumps straight to onFinish from any page, NEXT
+        /// destroys this page and opens the next one, and the last page's button becomes
+        /// BEGIN instead of NEXT. Reused for the title screen's own STORY button too, just
+        /// with a no-op onFinish (re-reading the intro shouldn't also start a new run).</summary>
+        private void ShowIntroPage(int index, UnityAction onFinish)
+        {
+            var overlayRT = CreateUIObject("IntroOverlay", _canvasTransform);
+            StretchFull(overlayRT);
+            var bg = overlayRT.gameObject.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.92f);
+            var overlayGO = overlayRT.gameObject;
+
+            var panelRT = CreateUIObject("Panel", overlayRT);
+            panelRT.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRT.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRT.sizeDelta = new Vector2(820, 360);
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 20;
+            panelLayout.padding = new RectOffset(36, 36, 30, 30);
+            panelLayout.childAlignment = TextAnchor.MiddleCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = PanelBg;
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            var pageText = CreateText(panelRT, IntroPages[index], 18, TextAnchor.MiddleCenter, new Color(0.92f, 0.9f, 0.85f));
+            AddLayoutElement(pageText.rectTransform, flexibleHeight: 1);
+
+            var btnRow = CreateUIObject("Buttons", panelRT);
+            AddLayoutElement(btnRow, preferredHeight: 46);
+            var btnLayout = btnRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+            btnLayout.spacing = 12;
+            btnLayout.childForceExpandWidth = true;
+
+            bool lastPage = index >= IntroPages.Length - 1;
+            if (!lastPage)
+            {
+                CreateButton(btnRow, "SKIP", () => { Destroy(overlayGO); onFinish(); }, new Color(0.22f, 0.22f, 0.22f));
+                CreateButton(btnRow, "NEXT", () => { Destroy(overlayGO); ShowIntroPage(index + 1, onFinish); }, new Color(0.2f, 0.3f, 0.2f));
+            }
+            else
+            {
+                CreateButton(btnRow, "BEGIN", () => { Destroy(overlayGO); onFinish(); }, new Color(0.2f, 0.3f, 0.2f));
+            }
+        }
+
         private void StartNewRun()
         {
+            if (_titleScreenGO != null) _titleScreenGO.SetActive(false);
+            if (_root != null) _root.SetActive(true);
+            if (_explorationMusicClip != null && _musicSource.clip != _explorationMusicClip)
+            {
+                _musicSource.clip = _explorationMusicClip;
+                _musicSource.Play();
+            }
+
             _rng = new System.Random();
             _runState = new RunState();
             _runState.Deck.AddRange(DefaultContent.BuildStarterDeck());
@@ -743,7 +841,7 @@ namespace Talune.UI
         /// to read before their first click.</summary>
         private void ShowTutorialOverlay(UnityAction onDone)
         {
-            var overlayRT = CreateUIObject("TutorialOverlay", _screenContainer.transform);
+            var overlayRT = CreateUIObject("TutorialOverlay", _canvasTransform); // Not _screenContainer - must still render while the title screen has _root hidden.
             StretchFull(overlayRT);
             var bg = overlayRT.gameObject.AddComponent<Image>();
             bg.color = new Color(0f, 0f, 0f, 0.9f);
@@ -1621,7 +1719,10 @@ namespace Talune.UI
                 _backgroundRT = bgRT;
             }
 
+            _canvasTransform = canvasGO.transform;
+
             var root = CreateUIObject("Root", canvasGO.transform);
+            _root = root.gameObject;
             StretchFull(root);
             var rootLayout = root.gameObject.AddComponent<VerticalLayoutGroup>();
             rootLayout.padding = new RectOffset(16, 16, 16, 16);
@@ -1703,12 +1804,72 @@ namespace Talune.UI
             _transitionOverlayImg = transitionRT.gameObject.AddComponent<Image>();
             _transitionOverlayImg.color = new Color(0f, 0f, 0f, 0f);
             _transitionOverlayImg.raycastTarget = false;
+
+            BuildTitleScreen(canvasGO.transform); // Last, so it renders on top of everything (Root/Background/overlays included) while active.
         }
 
         // ============================================================
         // Pause menu (Escape, or the HUD's pause button) - an overlay on top of
         // whatever screen is active, not a screen swap, so resuming just hides it.
         // ============================================================
+
+        // ============================================================
+        // Title screen - shown on load instead of dropping straight into a run.
+        // ============================================================
+
+        private void BuildTitleScreen(Transform canvasTransform)
+        {
+            _titleScreenGO = CreateUIObject("TitleScreen", canvasTransform).gameObject;
+            StretchFull(_titleScreenGO.GetComponent<RectTransform>());
+
+            var artRT = CreateUIObject("Art", _titleScreenGO.transform);
+            StretchFull(artRT);
+            var artImg = artRT.gameObject.AddComponent<Image>();
+            artImg.sprite = _titleArtSprite != null ? _titleArtSprite : _mapBackgroundSprite;
+            artImg.type = Image.Type.Simple;
+            artImg.preserveAspect = false;
+            artImg.raycastTarget = false;
+
+            var dimRT = CreateUIObject("Dim", _titleScreenGO.transform);
+            StretchFull(dimRT);
+            var dimImg = dimRT.gameObject.AddComponent<Image>();
+            dimImg.color = new Color(0f, 0f, 0f, 0.35f); // Just enough to keep the panel legible over the art.
+            dimImg.raycastTarget = false;
+
+            var panelRT = CreateUIObject("Panel", _titleScreenGO.transform);
+            panelRT.anchorMin = new Vector2(0.5f, 0f);
+            panelRT.anchorMax = new Vector2(0.5f, 0f);
+            panelRT.pivot = new Vector2(0.5f, 0f);
+            panelRT.sizeDelta = new Vector2(480, 360);
+            panelRT.anchoredPosition = new Vector2(0, 80);
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 14;
+            panelLayout.childAlignment = TextAnchor.UpperCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+
+            var title = CreateText(panelRT, "TALUNE", 52, TextAnchor.MiddleCenter, new Color(0.95f, 0.9f, 0.7f), pixelFont: true);
+            AddLayoutElement(title.rectTransform, preferredHeight: 64);
+            AddDropShadow(title, new Vector2(4, -4), 0.85f);
+
+            var subtitle = CreateText(panelRT, "a roguelite deckbuilder", 16, TextAnchor.MiddleCenter, new Color(0.85f, 0.82f, 0.65f));
+            AddLayoutElement(subtitle.rectTransform, preferredHeight: 24);
+            AddDropShadow(subtitle, new Vector2(2, -2), 0.7f);
+
+            var spacerRT = CreateUIObject("Spacer", panelRT);
+            AddLayoutElement(spacerRT, preferredHeight: 24);
+
+            var newRunBtn = CreateButton(panelRT, "NEW RUN", OnNewRunClicked, new Color(0.2f, 0.3f, 0.2f));
+            AddLayoutElement(newRunBtn.GetComponent<RectTransform>(), preferredHeight: 48);
+
+            var storyBtn = CreateButton(panelRT, "STORY", () => ShowIntroPage(0, () => { }), new Color(0.22f, 0.22f, 0.3f));
+            AddLayoutElement(storyBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+
+            var howToBtn = CreateButton(panelRT, "HOW TO PLAY", () => ShowTutorialOverlay(() => { }), new Color(0.22f, 0.22f, 0.22f));
+            AddLayoutElement(howToBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+
+            _titleScreenGO.SetActive(false);
+        }
 
         private void BuildPauseOverlay(Transform canvasTransform)
         {
