@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -55,6 +56,7 @@ namespace Talune.UI
 
         private Sprite _cardFrameSprite;
         private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
+        private readonly Dictionary<CardType, Sprite> _cardIconCache = new();
 
         /// <summary>Enemy art is looked up by DisplayName under Resources/Art/Enemies -
         /// enemies without generated art yet just show no sprite (panel still works).</summary>
@@ -63,6 +65,16 @@ namespace Talune.UI
             if (_enemySpriteCache.TryGetValue(displayName, out var cached)) return cached;
             var sprite = Resources.Load<Sprite>($"Art/Enemies/{displayName}");
             _enemySpriteCache[displayName] = sprite;
+            return sprite;
+        }
+
+        /// <summary>One shared illustration per CardType (Resources/Art/CardIcons) - every
+        /// card of a given type reuses the same art, so 5 images cover the whole roster.</summary>
+        private Sprite GetCardIcon(CardType type)
+        {
+            if (_cardIconCache.TryGetValue(type, out var cached)) return cached;
+            var sprite = Resources.Load<Sprite>($"Art/CardIcons/{type}");
+            _cardIconCache[type] = sprite;
             return sprite;
         }
 
@@ -101,8 +113,20 @@ namespace Talune.UI
 
         private void OnCardClicked(CardData card)
         {
+            var hpBefore = _combat.Enemies.ToDictionary(e => e, e => e.CurrentHP);
             _combat.TryPlayCard(card, _selectedTarget);
             RefreshAll();
+
+            // Hit feedback: punch-scale + flash any enemy that actually lost HP this play,
+            // so damage reads as an impact instead of a number silently changing.
+            foreach (var enemy in _combat.Enemies)
+            {
+                if (hpBefore.TryGetValue(enemy, out var before) && enemy.CurrentHP < before && _enemyUI.TryGetValue(enemy, out var ui))
+                {
+                    StopAndStartTween(ui.panelImage.rectTransform, PunchScale(ui.panelImage.rectTransform));
+                    StartCoroutine(FlashColor(ui.panelImage, new Color(1f, 0.3f, 0.3f), ui.panelImage.color));
+                }
+            }
         }
 
         private void OnEnemyClicked(EnemyCombatant enemy)
@@ -114,10 +138,18 @@ namespace Talune.UI
 
         private void OnEndTurnClicked()
         {
+            int hpBefore = _combat.Player.CurrentHP;
             _combat.EndPlayerTurn();
             if (_combat.Outcome == CombatOutcome.Ongoing && (_selectedTarget == null || _selectedTarget.IsDead))
                 _selectedTarget = _combat.Enemies.FirstOrDefault(e => !e.IsDead);
             RefreshAll();
+
+            // Same hit feedback, for the player taking enemy damage during their turn.
+            if (_combat.Player.CurrentHP < hpBefore)
+            {
+                StopAndStartTween(_playerStatsText.rectTransform, PunchScale(_playerStatsText.rectTransform));
+                StartCoroutine(FlashColor(_playerStatsText, new Color(1f, 0.35f, 0.35f), Color.white));
+            }
         }
 
         // --- Refresh ---
@@ -180,8 +212,10 @@ namespace Talune.UI
         }
 
         /// <summary>Builds one hand card as actual card art: the generated frame as the
-        /// full background (tinted grey when unaffordable), a colored type-tag strip up
-        /// top, and name/cost/description text on the parchment area.</summary>
+        /// full background (tinted grey when unaffordable), a type illustration filling
+        /// the upper parchment area, a colored type-tag strip, a round cost gem in the
+        /// corner, and name/description text below the art. Also wired for a hover-raise
+        /// (EventTrigger) so the hand doesn't sit dead-flat.</summary>
         private void CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction onClick)
         {
             var rt = CreateUIObject(card.CardName, parent);
@@ -197,33 +231,161 @@ namespace Talune.UI
             btn.interactable = affordable;
             btn.onClick.AddListener(onClick);
 
+            // Illustration, filling most of the upper parchment area - this is the single
+            // biggest thing that makes it read as a "card" instead of a text button.
+            var icon = GetCardIcon(card.Type);
+            if (icon != null)
+            {
+                var iconRT = CreateUIObject("Icon", rt);
+                iconRT.anchorMin = new Vector2(0.20f, 0.50f);
+                iconRT.anchorMax = new Vector2(0.80f, 0.86f);
+                iconRT.offsetMin = Vector2.zero;
+                iconRT.offsetMax = Vector2.zero;
+                var iconImg = iconRT.gameObject.AddComponent<Image>();
+                iconImg.sprite = icon;
+                iconImg.preserveAspect = true;
+                iconImg.raycastTarget = false;
+                if (!affordable) iconImg.color = new Color(0.6f, 0.6f, 0.6f, 0.7f);
+            }
+
             // Type tag strip along the top edge, inside the frame's border.
             var tagRT = CreateUIObject("TypeTag", rt);
-            tagRT.anchorMin = new Vector2(0.14f, 0.85f);
-            tagRT.anchorMax = new Vector2(0.86f, 0.94f);
+            tagRT.anchorMin = new Vector2(0.14f, 0.87f);
+            tagRT.anchorMax = new Vector2(0.86f, 0.95f);
             tagRT.offsetMin = Vector2.zero;
             tagRT.offsetMax = Vector2.zero;
             var tagImg = tagRT.gameObject.AddComponent<Image>();
             tagImg.color = CardTypeColor[card.Type];
+            tagImg.raycastTarget = false;
             var tagText = CreateText(tagRT, card.Type.ToString().ToUpperInvariant(), 11, TextAnchor.MiddleCenter, Color.white);
+            tagText.raycastTarget = false;
             StretchFull(tagText.rectTransform);
 
-            // Name + cost + description on the parchment area, well inside the ornate border.
+            // Cost gem - a round badge in the top-left corner, standard genre convention
+            // for "this is what it costs" instead of a plain text line.
+            var gemRT = CreateUIObject("CostGem", rt);
+            gemRT.anchorMin = new Vector2(0f, 0.90f);
+            gemRT.anchorMax = new Vector2(0f, 0.90f);
+            gemRT.pivot = new Vector2(0.5f, 0.5f);
+            gemRT.sizeDelta = new Vector2(30, 30);
+            gemRT.anchoredPosition = new Vector2(18, -4);
+            var gemImg = gemRT.gameObject.AddComponent<Image>();
+            gemImg.color = new Color(0.15f, 0.35f, 0.65f);
+            gemImg.raycastTarget = false;
+            // No sprite mask handy for a circle - a plain square badge reads fine at this size.
+            var gemText = CreateText(gemRT, card.EnergyCost.ToString(), 15, TextAnchor.MiddleCenter, Color.white);
+            gemText.raycastTarget = false;
+            StretchFull(gemText.rectTransform);
+
+            // Name + description on the parchment area below the illustration.
             var bodyRT = CreateUIObject("Body", rt);
-            bodyRT.anchorMin = new Vector2(0.16f, 0.08f);
-            bodyRT.anchorMax = new Vector2(0.84f, 0.83f);
+            bodyRT.anchorMin = new Vector2(0.14f, 0.08f);
+            bodyRT.anchorMax = new Vector2(0.86f, 0.49f);
             bodyRT.offsetMin = Vector2.zero;
             bodyRT.offsetMax = Vector2.zero;
             var kinLabel = card.KinTags.Count > 0 ? $" [{string.Join("+", card.KinTags)}]" : "";
-            var bodyText = CreateText(bodyRT, $"{card.CardName}{kinLabel}\nCost {card.EnergyCost}\n\n{card.Description}", 12, TextAnchor.UpperCenter, new Color(0.15f, 0.1f, 0.05f));
+            var bodyText = CreateText(bodyRT, $"{card.CardName}{kinLabel}\n{card.Description}", 12, TextAnchor.UpperCenter, new Color(0.15f, 0.1f, 0.05f));
+            bodyText.raycastTarget = false;
             StretchFull(bodyText.rectTransform);
+
+            AddHoverRaise(rt);
+        }
+
+        /// <summary>Hooks pointer-enter/exit so a hand card lifts and enlarges slightly
+        /// under the cursor and pops in front of its neighbors - the hand was previously
+        /// a dead-flat static row, which read more like a toolbar than a hand of cards.
+        /// Only the Y offset and scale are tweened (never X) since a HorizontalLayoutGroup
+        /// owns each card's X position - fighting that would fling cards sideways.</summary>
+        private void AddHoverRaise(RectTransform cardRT)
+        {
+            // Captured on the first hover, once the layout group has already placed this
+            // card - every subsequent enter/exit lifts from and returns to this same spot.
+            Vector2? basePos = null;
+            var trigger = cardRT.gameObject.AddComponent<EventTrigger>();
+
+            var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+            enter.callback.AddListener(_ =>
+            {
+                basePos ??= cardRT.anchoredPosition;
+                cardRT.SetAsLastSibling();
+                StopAndStartTween(cardRT, TweenCard(cardRT, basePos.Value + new Vector2(0, 24), new Vector3(1.12f, 1.12f, 1f)));
+            });
+            trigger.triggers.Add(enter);
+
+            var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+            exit.callback.AddListener(_ =>
+            {
+                if (basePos.HasValue) StopAndStartTween(cardRT, TweenCard(cardRT, basePos.Value, Vector3.one));
+            });
+            trigger.triggers.Add(exit);
+        }
+
+        private readonly Dictionary<RectTransform, Coroutine> _activeTweens = new();
+
+        private void StopAndStartTween(RectTransform rt, IEnumerator routine)
+        {
+            if (_activeTweens.TryGetValue(rt, out var existing) && existing != null) StopCoroutine(existing);
+            _activeTweens[rt] = StartCoroutine(routine);
+        }
+
+        private static IEnumerator TweenCard(RectTransform rt, Vector2 targetPos, Vector3 targetScale)
+        {
+            const float duration = 0.12f;
+            Vector2 startPos = rt.anchoredPosition;
+            Vector3 startScale = rt.localScale;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (rt == null) yield break;
+                rt.anchoredPosition = Vector2.Lerp(startPos, targetPos, p);
+                rt.localScale = Vector3.Lerp(startScale, targetScale, p);
+                yield return null;
+            }
+            if (rt != null) { rt.anchoredPosition = targetPos; rt.localScale = targetScale; }
+        }
+
+        /// <summary>Brief scale-punch, used for on-hit feedback (enemy or player taking damage).</summary>
+        private IEnumerator PunchScale(RectTransform rt)
+        {
+            const float duration = 0.18f;
+            Vector3 baseScale = Vector3.one;
+            Vector3 peak = new(1.08f, 1.08f, 1f);
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = t / duration;
+                if (rt == null) yield break;
+                rt.localScale = p < 0.5f ? Vector3.Lerp(baseScale, peak, p / 0.5f) : Vector3.Lerp(peak, baseScale, (p - 0.5f) / 0.5f);
+                yield return null;
+            }
+            if (rt != null) rt.localScale = baseScale;
+        }
+
+        /// <summary>Brief color flash, used for on-hit feedback. Graphic (not Image) so
+        /// the same helper covers both a panel's Image and the player stats Text.</summary>
+        private IEnumerator FlashColor(Graphic graphic, Color flashTo, Color returnTo)
+        {
+            const float duration = 0.25f;
+            graphic.color = flashTo;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                if (graphic == null) yield break;
+                graphic.color = Color.Lerp(flashTo, returnTo, t / duration);
+                yield return null;
+            }
+            if (graphic != null) graphic.color = returnTo;
         }
 
         // --- UI construction ---
 
         private void BuildUI()
         {
-            if (FindObjectOfType<EventSystem>() == null)
+            if (FindAnyObjectByType<EventSystem>() == null)
             {
                 // InputSystemUIInputModule, not the legacy StandaloneInputModule - this
                 // project has Active Input Handling set to the Input System package, and
@@ -312,7 +474,8 @@ namespace Talune.UI
             var handRowRT = CreateUIObject("HandRow", bottomBarRT);
             AddLayoutElement(handRowRT, flexibleHeight: 1);
             var handLayout = handRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
-            handLayout.spacing = 10;
+            handLayout.spacing = -35; // Slight overlap - a fanned hand, not a row of separate tiles.
+            handLayout.childAlignment = TextAnchor.LowerCenter;
             handLayout.childForceExpandWidth = false;
             handLayout.childForceExpandHeight = false;
             _handContainer = handRowRT;
