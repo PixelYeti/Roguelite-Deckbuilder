@@ -13,6 +13,9 @@ namespace Talune.Cards
         Heal,
         DrawCards,
         GainEnergy,
+        SummonWard,  // Places a Ward (see WardData) onto the player's side of the battlefield.
+        DestroyWard, // "Counter" - removes a target enemy Ward before it can act.
+        StealWard,   // Removes a target enemy Ward and creates an equivalent one under the player's control.
     }
 
     /// <summary>
@@ -27,6 +30,7 @@ namespace Talune.Cards
         public TargetType Target;
         public int Value; // Damage amount / Block amount / status stacks / heal amount / cards drawn / energy gained.
         public StatusEffectType Status; // Only used when Kind == ApplyStatus.
+        public WardData WardToSummon; // Only used when Kind == SummonWard.
 
         public static CardEffect Damage(TargetType target, int amount) =>
             new() { Kind = CardEffectKind.Damage, Target = target, Value = amount };
@@ -45,5 +49,14 @@ namespace Talune.Cards
 
         public static CardEffect GainEnergy(int amount) =>
             new() { Kind = CardEffectKind.GainEnergy, Target = TargetType.Self, Value = amount };
+
+        public static CardEffect SummonWard(WardData ward) =>
+            new() { Kind = CardEffectKind.SummonWard, Target = TargetType.Self, WardToSummon = ward };
+
+        public static CardEffect DestroyWard() =>
+            new() { Kind = CardEffectKind.DestroyWard, Target = TargetType.EnemyWard };
+
+        public static CardEffect StealWard() =>
+            new() { Kind = CardEffectKind.StealWard, Target = TargetType.EnemyWard };
     }
 }

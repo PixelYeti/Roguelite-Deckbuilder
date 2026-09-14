@@ -9,6 +9,7 @@ namespace Talune.Combat
         Buff,
         Debuff,
         Special,
+        Summon, // Places a Ward onto the battlefield instead of acting directly - see WardCombatant.
     }
 
     /// <summary>A telegraphed enemy action: category + the number the player should see

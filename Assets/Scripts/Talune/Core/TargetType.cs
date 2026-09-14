@@ -8,5 +8,6 @@ namespace Talune.Core
         SecondEnemy,   // Fix 7: "chains"/"spreads" effects - the next enemy after SingleEnemy.
                        // Deals base effect with no bonus / never fizzles if only 1 enemy exists.
         AllEnemies,
+        EnemyWard,     // A specific enemy Ward, chosen by the player - see CombatManager.WardCombatant.
     }
 }

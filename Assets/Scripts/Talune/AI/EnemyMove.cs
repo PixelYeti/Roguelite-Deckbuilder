@@ -1,3 +1,4 @@
+using Talune.Cards;
 using Talune.Combat;
 using Talune.Core;
 
@@ -14,6 +15,9 @@ namespace Talune.AI
         // Only used when Category is Buff, Debuff, or Special.
         public StatusEffectType Status;
         public bool StatusTargetsSelf; // true = Buff (applies to the enemy), false = Debuff/Special on the player.
+
+        // Only used when Category is Summon - which Ward it places onto the battlefield.
+        public WardData WardToSummon;
 
         public EnemyIntent ToIntent() => new(Category, Value, Description);
     }

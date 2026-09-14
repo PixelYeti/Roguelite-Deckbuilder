@@ -57,6 +57,14 @@ namespace Talune.UI
         private readonly List<string> _logLines = new();
         private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow, Image intentIcon, Image hpChip)> _enemyUI = new();
 
+        // --- Ward battlefield (see WardCombatant) - a small additive row of persistent
+        // units either side can place, fully rebuilt from _combat.PlayerWards/EnemyWards
+        // on every RefreshWardPanels() call rather than diffed incrementally, since Wards
+        // can appear/disappear mid-combat (unlike the fixed-for-the-fight enemy roster). ---
+        private Transform _playerWardRow;
+        private Transform _enemyWardRow;
+        private readonly Dictionary<WardCombatant, (Image panelImage, Text text, Image hpFill, Image hpChip)> _wardUI = new();
+
         // Click-a-card-then-click-a-target flow: a card needing an enemy target waits
         // here until the player picks one (or cancels), rather than requiring a target
         // to be pre-selected before a card can be played.
@@ -1201,20 +1209,24 @@ namespace Talune.UI
             if (_pendingCard != null) CancelPendingTarget();
 
             var livingEnemies = _combat.Enemies.Where(e => !e.IsDead).ToList();
+            bool needsWardChoice = card.Effects.Any(e => e.Target == TargetType.EnemyWard);
             bool needsChoice = livingEnemies.Count > 1 && card.Effects.Any(e => e.Target == TargetType.SingleEnemy || e.Target == TargetType.SecondEnemy);
 
-            if (needsChoice)
+            if (needsWardChoice || needsChoice)
             {
                 _pendingCard = card;
                 _pendingCardVisual = visual;
                 _awaitingTarget = true;
                 StopAndStartTween(visual, TweenCard(visual, new Vector2(0, 24), new Vector3(1.15f, 1.15f, 1f))); // Lift and hold, so it's visibly "armed".
-                _instructionsText.text = $"Choose a target for {card.CardName} - click an enemy (or press Escape / click the card again to cancel).";
+                _instructionsText.text = needsWardChoice
+                    ? $"Choose an enemy Ward for {card.CardName} - click a Ward (or press Escape / click the card again to cancel)."
+                    : $"Choose a target for {card.CardName} - click an enemy (or press Escape / click the card again to cancel).";
                 // NOT RefreshCombatUI() - that calls RebuildHand(), which destroys every
                 // hand card (including the one we just armed) and creates fresh ones,
                 // leaving _pendingCardVisual pointing at a destroyed object. Arming only
-                // changes enemy highlighting, not hand contents, so only refresh that.
+                // changes enemy/Ward highlighting, not hand contents, so only refresh those.
                 RefreshEnemyPanels();
+                RefreshWardPanels();
                 return;
             }
 
@@ -1230,6 +1242,7 @@ namespace Talune.UI
             _awaitingTarget = false;
             ResetInstructionsText();
             RefreshEnemyPanels(); // Same reasoning as above - don't touch the hand here.
+            RefreshWardPanels();
         }
 
         private void ResetInstructionsText()
@@ -1237,7 +1250,7 @@ namespace Talune.UI
             _instructionsText.text = "HOW TO PLAY:  Click a card to play it (or press 1-9).  If it needs a target, click the enemy to hit.  Press SPACE/ENTER or click END TURN when done.";
         }
 
-        private IEnumerator PlayCardSequence(CardData card, RectTransform visual, EnemyCombatant target)
+        private IEnumerator PlayCardSequence(CardData card, RectTransform visual, EnemyCombatant target, WardCombatant targetWard = null)
         {
             _cardActionInProgress = true;
             PlaySfx("CardPlay");
@@ -1247,7 +1260,7 @@ namespace Talune.UI
             int playerHpBefore = _combat.Player.CurrentHP;
             int playerBlockBefore = _combat.Player.Block;
             bool hasBlockEffect = card.Effects.Any(e => e.Kind == CardEffectKind.Block);
-            _combat.TryPlayCard(card, target);
+            _combat.TryPlayCard(card, target, targetWard);
             RefreshCombatUI(); // Destroys/rebuilds the hand - visual (now used) is gone after this.
 
             bool anyHit = false;
@@ -1309,6 +1322,7 @@ namespace Talune.UI
         {
             if (enemy.IsDead || _cardActionInProgress) return;
             if (_pendingCard == null) return;
+            if (_pendingCard.Effects.Any(e => e.Target == TargetType.EnemyWard)) return; // Needs a Ward click, not an enemy click - see OnWardClicked.
 
             var card = _pendingCard;
             var visual = _pendingCardVisual;
@@ -1317,6 +1331,23 @@ namespace Talune.UI
             _awaitingTarget = false;
             ResetInstructionsText();
             StartCoroutine(PlayCardSequence(card, visual, enemy));
+        }
+
+        /// <summary>Mirrors OnEnemyClicked - clicking an enemy Ward only matters while a
+        /// Counter/Steal-type card is armed and waiting for a Ward target.</summary>
+        private void OnWardClicked(WardCombatant ward)
+        {
+            if (ward.IsDead || _cardActionInProgress) return;
+            if (_pendingCard == null) return;
+            if (!_combat.EnemyWards.Contains(ward)) return; // Only enemy Wards are valid click-targets (Counter/Steal both target the opponent's side).
+
+            var card = _pendingCard;
+            var visual = _pendingCardVisual;
+            _pendingCard = null;
+            _pendingCardVisual = null;
+            _awaitingTarget = false;
+            ResetInstructionsText();
+            StartCoroutine(PlayCardSequence(card, visual, null, ward));
         }
 
         private void OnEndTurnClicked()
@@ -1441,6 +1472,94 @@ namespace Talune.UI
             }
         }
 
+        /// <summary>Full rebuild of both Ward slot rows from _combat.PlayerWards/EnemyWards -
+        /// unlike enemy panels (fixed for the whole fight), Wards can appear and disappear
+        /// mid-combat, so there's no stable per-Ward panel to diff against; destroy-and-
+        /// recreate every refresh instead (same approach as the HUD's relic row).</summary>
+        private void RefreshWardPanels()
+        {
+            if (_playerWardRow == null || _enemyWardRow == null) return;
+            for (int i = _playerWardRow.childCount - 1; i >= 0; i--) DestroyImmediate(_playerWardRow.GetChild(i).gameObject);
+            for (int i = _enemyWardRow.childCount - 1; i >= 0; i--) DestroyImmediate(_enemyWardRow.GetChild(i).gameObject);
+            _wardUI.Clear();
+
+            bool wardTargetable = _awaitingTarget && _pendingCard != null && _pendingCard.Effects.Any(e => e.Target == TargetType.EnemyWard);
+
+            foreach (var ward in _combat.PlayerWards) CreateWardSlotPanel(_playerWardRow, ward, clickable: false);
+            foreach (var ward in _combat.EnemyWards) CreateWardSlotPanel(_enemyWardRow, ward, clickable: wardTargetable);
+        }
+
+        private void CreateWardSlotPanel(Transform parent, WardCombatant ward, bool clickable)
+        {
+            var panelRT = CreateUIObject(ward.DisplayName, parent);
+            AddLayoutElement(panelRT, preferredWidth: 104, preferredHeight: 88);
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = clickable ? TargetSelectedBg : TargetBg;
+
+            if (clickable)
+            {
+                var btn = panelRT.gameObject.AddComponent<Button>();
+                btn.targetGraphic = panelImg;
+                btn.onClick.AddListener(() => OnWardClicked(ward));
+            }
+
+            var barBgRT = CreateUIObject("HealthBarBg", panelRT);
+            barBgRT.anchorMin = new Vector2(0.10f, 0.14f);
+            barBgRT.anchorMax = new Vector2(0.90f, 0.24f);
+            barBgRT.offsetMin = Vector2.zero;
+            barBgRT.offsetMax = Vector2.zero;
+            var barBgImg = barBgRT.gameObject.AddComponent<Image>();
+            barBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
+            barBgImg.raycastTarget = false;
+
+            // Same Filled+sprite+chip pattern as the player/enemy HP bars - Image.Type.Filled
+            // silently no-ops fillAmount without an assigned sprite (see GetSolidFillSprite).
+            var chipRT = CreateUIObject("Chip", barBgRT);
+            chipRT.anchorMin = Vector2.zero;
+            chipRT.anchorMax = Vector2.one;
+            chipRT.offsetMin = new Vector2(1, 1);
+            chipRT.offsetMax = new Vector2(-1, -1);
+            var chipImg = chipRT.gameObject.AddComponent<Image>();
+            chipImg.sprite = GetSolidFillSprite();
+            chipImg.type = Image.Type.Filled;
+            chipImg.fillMethod = Image.FillMethod.Horizontal;
+            chipImg.fillOrigin = (int)Image.OriginHorizontal.Left;
+            chipImg.color = new Color(1f, 0.92f, 0.35f);
+            chipImg.raycastTarget = false;
+
+            var fillRT = CreateUIObject("Fill", barBgRT);
+            fillRT.anchorMin = Vector2.zero;
+            fillRT.anchorMax = Vector2.one;
+            fillRT.offsetMin = new Vector2(1, 1);
+            fillRT.offsetMax = new Vector2(-1, -1);
+            var fillImg = fillRT.gameObject.AddComponent<Image>();
+            fillImg.sprite = GetSolidFillSprite();
+            fillImg.type = Image.Type.Filled;
+            fillImg.fillMethod = Image.FillMethod.Horizontal;
+            fillImg.fillOrigin = (int)Image.OriginHorizontal.Left;
+            fillImg.raycastTarget = false;
+            SetHealthBarFill(fillImg, ward.CurrentHP, ward.MaxHP); // Instant, not animated - this panel was just freshly created this refresh, so there's no "previous" state to tween from.
+            chipImg.fillAmount = fillImg.fillAmount;
+
+            var textRT = CreateUIObject("Text", panelRT);
+            textRT.anchorMin = new Vector2(0f, 0.26f);
+            textRT.anchorMax = new Vector2(1f, 1f);
+            textRT.offsetMin = Vector2.zero;
+            textRT.offsetMax = Vector2.zero;
+            var text = textRT.gameObject.AddComponent<Text>();
+            text.font = BuiltinFont();
+            text.fontSize = 11;
+            text.alignment = TextAnchor.MiddleCenter;
+            text.color = Color.white;
+            text.horizontalOverflow = HorizontalWrapMode.Wrap;
+            text.raycastTarget = false;
+            text.text = (clickable ? "◆ TARGET ◆\n" : "") + $"{ward.DisplayName}\nHP {ward.CurrentHP}/{ward.MaxHP}";
+
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            _wardUI[ward] = (panelImg, text, fillImg, chipImg);
+        }
+
         /// <summary>Rebuilds the small pill-badge row showing an entity's active status
         /// stacks (Burn/Growth/Thorns/Stun/Illusion) - previously only the player's had
         /// any visibility at all, and only as text buried in the stats line; enemy
@@ -1491,6 +1610,7 @@ namespace Talune.UI
             AnimateHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP, _playerHpChip);
             RefreshStatusRow(_playerStatusRow, p);
             RefreshEnemyPanels();
+            RefreshWardPanels();
             RebuildHand();
             _logText.text = string.Join("\n", _logLines.TakeLast(6).Select(ColorizeLogLine));
             _drawPileText.text = _combat.Deck.DrawPileCount.ToString();
@@ -1587,6 +1707,7 @@ namespace Talune.UI
             IntentCategory.Buff => $"BUFF ({intent.Description ?? "self"})",
             IntentCategory.Debuff => $"DEBUFF ({intent.Description ?? "?"})",
             IntentCategory.Special => $"SPECIAL: {intent.Description ?? "?"}",
+            IntentCategory.Summon => $"SUMMON: {intent.Description ?? "a Ward"}",
             _ => "?",
         };
 
@@ -2558,6 +2679,45 @@ namespace Talune.UI
             // immediately - see GetSolidFillSprite).
             enemyRowLayout.childForceExpandWidth = false;
             _enemyRow = enemyRowRT;
+
+            // Ward battlefield - a thin shared strip between the enemy row and the log,
+            // player Wards on the left / enemy Wards on the right, split by a divider.
+            var wardRowRT = CreateUIObject("WardRow", screen);
+            AddLayoutElement(wardRowRT, preferredHeight: 110);
+            var wardRowImg = wardRowRT.gameObject.AddComponent<Image>();
+            // Solid PanelBg, not a semi-transparent tint - matches every other panel on
+            // this screen (Instructions/LogPanel/BottomBar) and, unlike a 0.55-alpha tint,
+            // reads clearly regardless of what's in the background art behind it (verified
+            // by pixel-sampling the rendered row: a subtle tint blended almost invisibly
+            // into the forest background - not a rendering bug, just too low contrast).
+            wardRowImg.color = PanelBg;
+            AddDecorativeFrame(wardRowRT, _panelFrameSprite);
+            var wardRowLayout = wardRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            wardRowLayout.spacing = 18;
+            wardRowLayout.childAlignment = TextAnchor.MiddleCenter;
+            wardRowLayout.padding = new RectOffset(16, 16, 10, 10);
+            wardRowLayout.childForceExpandWidth = false;
+
+            var playerWardSlotsRT = CreateUIObject("PlayerWardSlots", wardRowRT);
+            AddLayoutElement(playerWardSlotsRT, flexibleWidth: 1, preferredHeight: 90);
+            var playerWardLayout = playerWardSlotsRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            playerWardLayout.spacing = 10;
+            playerWardLayout.childAlignment = TextAnchor.MiddleLeft;
+            playerWardLayout.childForceExpandWidth = false;
+            _playerWardRow = playerWardSlotsRT;
+
+            var wardDividerRT = CreateUIObject("Divider", wardRowRT);
+            AddLayoutElement(wardDividerRT, preferredWidth: 2, preferredHeight: 80);
+            var wardDividerImg = wardDividerRT.gameObject.AddComponent<Image>();
+            wardDividerImg.color = new Color(0.3f, 0.28f, 0.2f, 0.6f);
+
+            var enemyWardSlotsRT = CreateUIObject("EnemyWardSlots", wardRowRT);
+            AddLayoutElement(enemyWardSlotsRT, flexibleWidth: 1, preferredHeight: 90);
+            var enemyWardLayout = enemyWardSlotsRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            enemyWardLayout.spacing = 10;
+            enemyWardLayout.childAlignment = TextAnchor.MiddleRight;
+            enemyWardLayout.childForceExpandWidth = false;
+            _enemyWardRow = enemyWardSlotsRT;
 
             var logPanelRT = CreateUIObject("LogPanel", screen);
             AddLayoutElement(logPanelRT, flexibleHeight: 1);

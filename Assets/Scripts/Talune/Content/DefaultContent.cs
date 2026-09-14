@@ -234,6 +234,50 @@ namespace Talune.Content
             CardEffect.Block(7), CardEffect.Heal(2)),
             "Gain 10 Block. Heal 3.", CardEffect.Block(10), CardEffect.Heal(3));
 
+        // --- Wards (see WardData/WardCombatant) - small persistent battlefield units
+        // either side can place; each has its own small HP and one recurring
+        // EnemyMove-shaped action, reusing Move() below rather than new AI machinery. ---
+
+        public static WardData RootSaplingWard(int hp = 10) => MakeWard("Root Sapling", hp, Move(IntentCategory.Attack, 3));
+
+        public static WardData SparkSentryWard(int hp = 8) => MakeWard("Spark Sentry", hp, Move(IntentCategory.Attack, 4));
+
+        private static WardData MakeWard(string displayName, int maxHP, EnemyMove action)
+        {
+            var ward = ScriptableObject.CreateInstance<WardData>();
+            ward.DisplayName = displayName;
+            ward.MaxHP = maxHP;
+            ward.Action = action;
+            return ward;
+        }
+
+        // --- Ward-related cards: Summon (place a Ward), "Counter" (destroy an enemy
+        // Ward before it acts), and Steal (take an enemy Ward for yourself). ---
+
+        public static CardData SummonSapling() => WithUpgrade(MakeCard("Summon Sapling",
+            "Summon a Root Sapling (10 HP) to your battlefield.", CardType.Skill, KinType.Mossmaw, 1,
+            CardEffect.SummonWard(RootSaplingWard())),
+            "Summon a Root Sapling (16 HP) to your battlefield.",
+            CardEffect.SummonWard(RootSaplingWard(16)));
+
+        public static CardData SummonSentry() => WithUpgrade(MakeCard("Summon Sentry",
+            "Summon a Spark Sentry (8 HP) to your battlefield.", CardType.Skill, KinType.Voltrix, 1,
+            CardEffect.SummonWard(SparkSentryWard())),
+            "Summon a Spark Sentry (12 HP) to your battlefield.",
+            CardEffect.SummonWard(SparkSentryWard(12)));
+
+        public static CardData Sunder() => WithUpgrade(MakeCard("Sunder",
+            "Destroy an enemy Ward.", CardType.Attack, KinType.None, 1,
+            CardEffect.DestroyWard()),
+            "Destroy an enemy Ward. Deal 4 damage to a second enemy.",
+            CardEffect.DestroyWard(), CardEffect.Damage(TargetType.SecondEnemy, 4));
+
+        public static CardData Subvert() => WithUpgrade(MakeCard("Subvert",
+            "Steal an enemy Ward to your side.", CardType.Skill, KinType.None, 2,
+            CardEffect.StealWard()),
+            "Steal an enemy Ward to your side. Draw 1 card.",
+            CardEffect.StealWard(), CardEffect.DrawCards(1));
+
         public static List<CardData> BuildRewardPool() => new()
         {
             StaticFang(), BubbleGuard(), RootStrike(),
@@ -245,6 +289,8 @@ namespace Talune.Content
             WithRarity(HealingTide(), CardRarity.Uncommon), WithRarity(RiptideStrike(), CardRarity.Uncommon), StaticSurge(),
             WithRarity(LightningLance(), CardRarity.Uncommon), WithRarity(DeepRoots(), CardRarity.Uncommon), VineWhip(),
             Adrenaline(), IronWill(),
+            WithRarity(SummonSapling(), CardRarity.Uncommon), WithRarity(SummonSentry(), CardRarity.Uncommon),
+            WithRarity(Sunder(), CardRarity.Uncommon), WithRarity(Subvert(), CardRarity.Rare),
         };
 
         /// <summary>Meta-progression unlock (see MetaProgress) - a strong vanilla finisher,
@@ -332,13 +378,16 @@ namespace Talune.Content
                 Rule(Move(IntentCategory.Block, 6), weight: 1f)));
 
         /// <summary>A defensive basic enemy - blocks more than it attacks, so the player
-        /// has to actually break through Block rather than just racing damage.</summary>
+        /// has to actually break through Block rather than just racing damage. Also the
+        /// first enemy with a Summon move (see WardData/WardCombatant) - it digs in and
+        /// calls up a Root Sapling to fight alongside it once it's had a turn to settle.</summary>
         public static EnemyCombatant CreateMudshell(float hpMultiplier = 1f) => new(
             "Mudshell", ScaleHP(BaselineNumbers.BasicEnemyStandardHP + 6, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Block, 10), weight: 2f),
                 Rule(Move(IntentCategory.Attack, 6), weight: 2f),
-                Rule(Move(IntentCategory.Attack, 10), weight: 1f, maxConsecutive: 1)));
+                Rule(Move(IntentCategory.Attack, 10), weight: 1f, maxConsecutive: 1),
+                Rule(MoveSummon(RootSaplingWard(), "Root Call"), weight: 1f, minTurn: 1, maxConsecutive: 1)));
 
         /// <summary>A second ranged/debuff basic (alongside Glowmoth) so a Combat node
         /// drawing two ranged enemies doesn't always mean the exact same fight twice.</summary>
@@ -395,6 +444,18 @@ namespace Talune.Content
                 Description = description,
                 Status = status,
                 StatusTargetsSelf = targetsSelf,
+            };
+        }
+
+        /// <summary>A Summon-category move - places `ward` onto the caller's side of the
+        /// battlefield instead of acting directly. See IntentCategory.Summon.</summary>
+        private static EnemyMove MoveSummon(WardData ward, string description = null)
+        {
+            return new EnemyMove
+            {
+                Category = IntentCategory.Summon,
+                WardToSummon = ward,
+                Description = description,
             };
         }
 

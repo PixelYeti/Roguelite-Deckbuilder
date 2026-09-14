@@ -19,11 +19,20 @@ namespace Talune.Combat
     /// </summary>
     public class CombatManager
     {
+        public const int WardSlotsPerSide = 2;
+
         public PlayerCombatant Player { get; }
         public List<EnemyCombatant> Enemies { get; }
         public Deck Deck { get; }
         public CombatOutcome Outcome { get; private set; } = CombatOutcome.Ongoing;
         public int TurnCount { get; private set; } = 0;
+
+        /// <summary>The shared battlefield (see WardCombatant) - additive on top of the
+        /// existing HP-trading combat loop, not a replacement for it. Capped at
+        /// WardSlotsPerSide per side, enforced at summon/steal time in ResolveCardEffect
+        /// and in ResolveEnemyMove's Summon handling.</summary>
+        public List<WardCombatant> PlayerWards { get; } = new();
+        public List<WardCombatant> EnemyWards { get; } = new();
 
         public event Action<string> OnLog; // Simple text log for the test harness / debug UI.
 
@@ -70,31 +79,47 @@ namespace Talune.Combat
             Player.TickStartOfTurnStatuses(); // Burn ticks, if the player is burning.
             Player.RefillEnergy();
             Deck.DrawCards(BaselineNumbers.PlayerDrawPerTurn);
+            ResolvePlayerWardActions();
+            CleanupDeadWards();
             _hasPlayedCardThisTurn = false;
             _hasPlayedAttackThisTurn = false;
             Log($"[Turn {TurnCount}] Player turn. Energy {Player.Energy}/{Player.MaxEnergy}, hand: {Deck.Hand.Count} cards.");
             CheckCombatEnd();
         }
 
-        /// <summary>Attempts to play a card. Returns false (and logs why) if it can't be played.</summary>
-        public bool TryPlayCard(CardData card, EnemyCombatant primaryTarget)
+        /// <summary>Attempts to play a card. Returns false (and logs why) if it can't be played.
+        /// `targetWard` is only consulted for effects targeting TargetType.EnemyWard
+        /// (Counter/Steal) - unused otherwise.</summary>
+        public bool TryPlayCard(CardData card, EnemyCombatant primaryTarget, WardCombatant targetWard = null)
         {
             if (Outcome != CombatOutcome.Ongoing) return false;
             if (!Deck.Hand.Contains(card)) { Log($"{card.CardName} is not in hand."); return false; }
+
+            // Ward-specific effects are validated BEFORE spending energy, same tier as the
+            // affordability check below - a blocked Summon/Destroy/Steal must not cost anything.
+            foreach (var effect in card.Effects)
+            {
+                if (effect.Kind == CardEffectKind.SummonWard && PlayerWards.Count >= WardSlotsPerSide)
+                { Log($"No open Ward slot for {card.CardName}."); return false; }
+                if (effect.Kind is CardEffectKind.DestroyWard or CardEffectKind.StealWard && (targetWard == null || !EnemyWards.Contains(targetWard)))
+                { Log($"{card.CardName} needs an enemy Ward to target."); return false; }
+                if (effect.Kind == CardEffectKind.StealWard && PlayerWards.Count >= WardSlotsPerSide)
+                { Log($"No open Ward slot to steal into for {card.CardName}."); return false; }
+            }
 
             int cost = _relics.ModifyCardCost(card.EnergyCost, isFirstCardThisTurn: !_hasPlayedCardThisTurn);
             if (!Player.CanAfford(cost)) { Log($"Not enough energy for {card.CardName}."); return false; }
 
             Player.SpendEnergy(cost);
             foreach (var effect in card.Effects)
-                ResolveCardEffect(effect, primaryTarget);
+                ResolveCardEffect(effect, primaryTarget, targetWard);
 
             bool isAttack = card.Type == CardType.Attack;
             if (isAttack && _relics.ShouldDoubleAttackEffects(isFirstAttackThisTurn: !_hasPlayedAttackThisTurn))
             {
                 Log($"  Relic: {card.CardName} triggers twice.");
                 foreach (var effect in card.Effects)
-                    ResolveCardEffect(effect, primaryTarget);
+                    ResolveCardEffect(effect, primaryTarget, targetWard);
             }
 
             if (card.KinTags.Contains(KinType.Mossmaw))
@@ -111,7 +136,7 @@ namespace Talune.Combat
             return true;
         }
 
-        private void ResolveCardEffect(CardEffect effect, EnemyCombatant primaryTarget)
+        private void ResolveCardEffect(CardEffect effect, EnemyCombatant primaryTarget, WardCombatant targetWard = null)
         {
             switch (effect.Kind)
             {
@@ -140,6 +165,26 @@ namespace Talune.Combat
                     break;
                 case CardEffectKind.GainEnergy:
                     Player.GainEnergy(effect.Value);
+                    break;
+                case CardEffectKind.SummonWard:
+                    if (effect.WardToSummon != null && PlayerWards.Count < WardSlotsPerSide)
+                    {
+                        var ward = new WardCombatant(effect.WardToSummon.DisplayName, effect.WardToSummon.MaxHP, Side.Player, effect.WardToSummon.Action, PlayerWards.Count);
+                        PlayerWards.Add(ward);
+                        Log($"  Summoned {ward.DisplayName} ({ward.MaxHP} HP).");
+                    }
+                    break;
+                case CardEffectKind.DestroyWard:
+                    if (targetWard != null && EnemyWards.Remove(targetWard))
+                        Log($"  Destroyed {targetWard.DisplayName}.");
+                    break;
+                case CardEffectKind.StealWard:
+                    if (targetWard != null && PlayerWards.Count < WardSlotsPerSide && EnemyWards.Remove(targetWard))
+                    {
+                        var stolen = new WardCombatant(targetWard.DisplayName, targetWard.MaxHP, Side.Player, targetWard.Action, PlayerWards.Count);
+                        PlayerWards.Add(stolen);
+                        Log($"  Stole {stolen.DisplayName} to your side.");
+                    }
                     break;
             }
         }
@@ -181,6 +226,13 @@ namespace Talune.Combat
 
         private void RunEnemyTurn()
         {
+            // Enemy Wards act first, as a simple deterministic "vanguard" ordering -
+            // ahead of the enemies themselves, symmetric to player Wards acting at the
+            // start of the player's own turn (see StartPlayerTurn).
+            ResolveEnemyWardActions();
+            CleanupDeadWards();
+            if (Outcome != CombatOutcome.Ongoing) return;
+
             foreach (var enemy in Enemies.Where(e => !e.IsDead))
             {
                 enemy.ResetBlockForNewTurn(); // Fix 8 applies symmetrically to enemies.
@@ -202,37 +254,91 @@ namespace Talune.Combat
         private void ResolveEnemyMove(EnemyCombatant enemy)
         {
             var move = enemy.PendingMove;
+            if (move.Category == IntentCategory.Summon)
+            {
+                if (move.WardToSummon != null && EnemyWards.Count < WardSlotsPerSide)
+                {
+                    var ward = new WardCombatant(move.WardToSummon.DisplayName, move.WardToSummon.MaxHP, Side.Enemy, move.WardToSummon.Action, EnemyWards.Count);
+                    EnemyWards.Add(ward);
+                    Log($"  {enemy.DisplayName} summons {ward.DisplayName} ({ward.MaxHP} HP)!");
+                }
+                else
+                {
+                    Log($"  {enemy.DisplayName} tries to summon, but the battlefield is full.");
+                }
+                CheckCombatEnd();
+                return;
+            }
+            ApplyMove(enemy, enemy.DisplayName, move, Player, "Rook");
+        }
+
+        /// <summary>Resolves one EnemyMove for any actor that has one - an enemy on its
+        /// own turn, or a Ward (see ResolvePlayerWardActions/ResolveEnemyWardActions) on
+        /// its owner's turn. `self` receives Block/Buff; `opponent` receives Attack
+        /// damage and Debuff/Special (when not self-targeting). Summon is handled
+        /// separately in ResolveEnemyMove since only enemies summon in this slice -
+        /// the case here is just a safety no-op if a Ward's own Action is ever Summon.</summary>
+        private void ApplyMove(CombatEntity self, string selfName, EnemyMove move, CombatEntity opponent, string opponentName)
+        {
             switch (move.Category)
             {
                 case IntentCategory.Attack:
-                    int dealt = Player.TakeDamage(move.Value);
-                    Log($"  {enemy.DisplayName} attacks for {dealt} ({Player.CurrentHP}/{Player.MaxHP} HP left).");
-                    // Thorns (Fix 14): reflects on attacks the player takes. Simplification for the
+                    int dealt = opponent.TakeDamage(move.Value);
+                    Log($"  {selfName} attacks for {dealt} ({opponentName} {opponent.CurrentHP}/{opponent.MaxHP} HP left).");
+                    // Thorns (Fix 14): reflects on attacks taken. Simplification for the
                     // vertical slice - not yet gated to "melee only" since enemy roles (Melee/Ranged/
                     // Special) aren't a combat-mechanical flag yet, only a content-authoring one.
-                    int thorns = Player.ThornsReflectDamage();
+                    int thorns = opponent.ThornsReflectDamage();
                     if (thorns > 0)
                     {
-                        enemy.TakeDamage(thorns);
-                        Log($"  Thorns reflects {thorns} back at {enemy.DisplayName}.");
+                        self.TakeDamage(thorns);
+                        Log($"  Thorns reflects {thorns} back at {selfName}.");
                     }
                     break;
                 case IntentCategory.Block:
-                    enemy.GainBlock(move.Value);
-                    Log($"  {enemy.DisplayName} blocks for {move.Value}.");
+                    self.GainBlock(move.Value);
+                    Log($"  {selfName} blocks for {move.Value}.");
                     break;
                 case IntentCategory.Buff:
-                    enemy.ApplyStatus(move.Status, move.Value);
-                    Log($"  {enemy.DisplayName} buffs itself: +{move.Value} {move.Status}.");
+                    self.ApplyStatus(move.Status, move.Value);
+                    Log($"  {selfName} buffs itself: +{move.Value} {move.Status}.");
                     break;
                 case IntentCategory.Debuff:
                 case IntentCategory.Special:
-                    var recipient = move.StatusTargetsSelf ? (CombatEntity)enemy : Player;
+                    var recipient = move.StatusTargetsSelf ? self : opponent;
                     recipient.ApplyStatus(move.Status, move.Value);
-                    Log($"  {enemy.DisplayName} uses {move.Description ?? move.Category.ToString()}.");
+                    Log($"  {selfName} uses {move.Description ?? move.Category.ToString()}.");
                     break;
+                case IntentCategory.Summon:
+                    break; // Wards don't summon further Wards in this Phase 1 slice.
             }
             CheckCombatEnd();
+        }
+
+        /// <summary>Player Wards act once per player turn, right after the draw step -
+        /// see StartPlayerTurn. Each attacks the first living enemy (Wards don't yet
+        /// have their own targeting choices - a natural Phase 2 extension).</summary>
+        private void ResolvePlayerWardActions()
+        {
+            foreach (var ward in PlayerWards.Where(w => !w.IsDead).ToList())
+            {
+                var opponent = Enemies.FirstOrDefault(e => !e.IsDead);
+                if (opponent == null) break; // Nothing left to act against.
+                ApplyMove(ward, ward.DisplayName, ward.Action, opponent, opponent.DisplayName);
+            }
+        }
+
+        /// <summary>Enemy Wards act once per enemy turn - see RunEnemyTurn.</summary>
+        private void ResolveEnemyWardActions()
+        {
+            foreach (var ward in EnemyWards.Where(w => !w.IsDead).ToList())
+                ApplyMove(ward, ward.DisplayName, ward.Action, Player, "Rook");
+        }
+
+        private void CleanupDeadWards()
+        {
+            PlayerWards.RemoveAll(w => w.IsDead);
+            EnemyWards.RemoveAll(w => w.IsDead);
         }
 
         private void CheckCombatEnd()
