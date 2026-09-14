@@ -1,10 +1,12 @@
 fileFormatVersion: 2
-guid: 699f704c9a0685645b3085133a379d20
+guid: c051b1881e8f9d747880503c47e06bb9
+labels:
+- UnityAI
 TextureImporter:
   internalIDToNameTable:
   - first:
-      213: -1306988184310151341
-    second: CardFrame_0
+      213: 2263100468371009280
+    second: CombatBackground_0
   externalObjects: {}
   serializedVersion: 13
   mipmaps:
@@ -76,7 +78,7 @@ TextureImporter:
     buildTarget: DefaultTexturePlatform
     maxTextureSize: 2048
     resizeAlgorithm: 0
-    textureFormat: 4
+    textureFormat: -1
     textureCompression: 0
     compressionQuality: 50
     crunchedCompression: 0
@@ -115,13 +117,13 @@ TextureImporter:
     serializedVersion: 2
     sprites:
     - serializedVersion: 2
-      name: CardFrame_0
+      name: CombatBackground_0
       rect:
         serializedVersion: 2
         x: 0
         y: 0
-        width: 1024
-        height: 1024
+        width: 2048
+        height: 2048
       alignment: 0
       pivot: {x: 0, y: 0}
       border: {x: 0, y: 0, z: 0, w: 0}
@@ -130,8 +132,8 @@ TextureImporter:
       physicsShape: []
       tessellationDetail: -1
       bones: []
-      spriteID: 3578f8ccb25acdde0800000000000000
-      internalID: -1306988184310151341
+      spriteID: 00f2644b2e5286f10800000000000000
+      internalID: 2263100468371009280
       vertices: []
       indices: 
       edges: []

@@ -100,6 +100,7 @@ namespace Talune.UI
         };
 
         private Sprite _cardFrameSprite;
+        private Sprite _combatBackgroundSprite;
         private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
         private readonly Dictionary<CardType, Sprite> _cardIconCache = new();
 
@@ -136,6 +137,7 @@ namespace Talune.UI
         private void Awake()
         {
             _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
+            _combatBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/CombatBackground");
             _sfxSource = gameObject.AddComponent<AudioSource>();
             _sfxSource.playOnAwake = false;
             BuildUI();
@@ -965,6 +967,17 @@ namespace Talune.UI
             var scaler = canvasGO.GetComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1600, 900);
+
+            if (_combatBackgroundSprite != null)
+            {
+                var bgRT = CreateUIObject("Background", canvasGO.transform);
+                StretchFull(bgRT);
+                var bgImg = bgRT.gameObject.AddComponent<Image>();
+                bgImg.sprite = _combatBackgroundSprite;
+                bgImg.type = Image.Type.Simple;
+                bgImg.preserveAspect = false; // Cover the full canvas regardless of aspect ratio.
+                bgImg.raycastTarget = false;
+            }
 
             var root = CreateUIObject("Root", canvasGO.transform);
             StretchFull(root);
