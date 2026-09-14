@@ -89,6 +89,20 @@ namespace Talune.UI
         private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
         private readonly Dictionary<CardType, Sprite> _cardIconCache = new();
 
+        private AudioSource _sfxSource;
+        private readonly Dictionary<string, AudioClip> _sfxCache = new();
+        private bool _cardActionInProgress; // Guards against double-clicks during the brief play animation.
+
+        private void PlaySfx(string name)
+        {
+            if (!_sfxCache.TryGetValue(name, out var clip))
+            {
+                clip = Resources.Load<AudioClip>($"Audio/SFX/{name}");
+                _sfxCache[name] = clip; // Cache the miss too (null) - no repeated failed loads.
+            }
+            if (clip != null) _sfxSource.PlayOneShot(clip);
+        }
+
         private Sprite GetEnemySprite(string displayName)
         {
             if (_enemySpriteCache.TryGetValue(displayName, out var cached)) return cached;
@@ -108,6 +122,8 @@ namespace Talune.UI
         private void Awake()
         {
             _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
+            _sfxSource = gameObject.AddComponent<AudioSource>();
+            _sfxSource.playOnAwake = false;
             BuildUI();
             StartNewRun();
         }
@@ -247,32 +263,78 @@ namespace Talune.UI
             if (_logLines.Count > 200) _logLines.RemoveAt(0);
         }
 
-        private void OnCardClicked(CardData card)
+        /// <summary>Click handler for a hand card: plays a brief "cast" animation on the
+        /// clicked card BEFORE resolving it, so the card is actually seen being used
+        /// rather than instantly vanishing into a rebuilt hand.</summary>
+        private void OnCardClicked(CardData card, RectTransform visual)
         {
-            var hpBefore = _combat.Enemies.ToDictionary(e => e, e => e.CurrentHP);
-            _combat.TryPlayCard(card, _selectedTarget);
-            RefreshCombatUI();
+            if (_cardActionInProgress) return;
+            StartCoroutine(PlayCardSequence(card, visual));
+        }
 
+        private IEnumerator PlayCardSequence(CardData card, RectTransform visual)
+        {
+            _cardActionInProgress = true;
+            PlaySfx("CardPlay");
+            yield return PlayCardCastAnimation(visual);
+
+            var hpBefore = _combat.Enemies.ToDictionary(e => e, e => e.CurrentHP);
+            bool hasBlockEffect = card.Effects.Any(e => e.Kind == CardEffectKind.Block);
+            _combat.TryPlayCard(card, _selectedTarget);
+            RefreshCombatUI(); // Destroys/rebuilds the hand - visual (now used) is gone after this.
+
+            bool anyHit = false;
             foreach (var enemy in _combat.Enemies)
             {
                 if (hpBefore.TryGetValue(enemy, out var before) && enemy.CurrentHP < before && _enemyUI.TryGetValue(enemy, out var ui))
                 {
+                    anyHit = true;
                     StopAndStartTween(ui.panelImage.rectTransform, PunchScale(ui.panelImage.rectTransform));
                     StartCoroutine(FlashColor(ui.panelImage, new Color(1f, 0.3f, 0.3f), ui.panelImage.color));
                 }
+            }
+            if (anyHit) PlaySfx("Hit");
+            else if (hasBlockEffect) PlaySfx("Block");
+
+            _cardActionInProgress = false;
+        }
+
+        /// <summary>Quick punch-up-and-forward before the card actually resolves.</summary>
+        private static IEnumerator PlayCardCastAnimation(RectTransform visual)
+        {
+            const float duration = 0.15f;
+            Vector3 startScale = visual.localScale;
+            Vector2 startPos = visual.anchoredPosition;
+            Vector3 peakScale = startScale * 1.25f;
+            Vector2 peakPos = startPos + new Vector2(0, 50);
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (visual == null) yield break;
+                visual.localScale = Vector3.Lerp(startScale, peakScale, p);
+                visual.anchoredPosition = Vector2.Lerp(startPos, peakPos, p);
+                yield return null;
             }
         }
 
         private void OnEnemyClicked(EnemyCombatant enemy)
         {
-            if (enemy.IsDead) return;
+            if (enemy.IsDead || _cardActionInProgress) return;
             _selectedTarget = enemy;
             RefreshCombatUI();
         }
 
         private void OnEndTurnClicked()
         {
+            if (_cardActionInProgress) return;
             int hpBefore = _combat.Player.CurrentHP;
+            // Snapshot BEFORE resolving - by the time EndPlayerTurn() returns, each enemy's
+            // NextIntent has already been overwritten with what they'll do NEXT turn, so
+            // this is the only chance to know who actually attacked just now.
+            var attackers = _combat.Enemies.Where(e => !e.IsDead && e.NextIntent.Category == IntentCategory.Attack).ToList();
+
             _combat.EndPlayerTurn();
             if (_combat.Outcome == CombatOutcome.Ongoing && (_selectedTarget == null || _selectedTarget.IsDead))
                 _selectedTarget = _combat.Enemies.FirstOrDefault(e => !e.IsDead);
@@ -283,6 +345,59 @@ namespace Talune.UI
                 StopAndStartTween(_playerStatsText.rectTransform, PunchScale(_playerStatsText.rectTransform));
                 StartCoroutine(FlashColor(_playerStatsText, new Color(1f, 0.35f, 0.35f), Color.white));
             }
+
+            StartCoroutine(PlayEnemyAttackAnimations(attackers));
+        }
+
+        /// <summary>Staggers a lunge + Hit SFX per attacking enemy so multiple attacks in
+        /// one turn read as a sequence of blows rather than one simultaneous jolt. The
+        /// underlying numbers are already resolved (see the comment above) - this is
+        /// purely the visual/audio follow-through.</summary>
+        private IEnumerator PlayEnemyAttackAnimations(List<EnemyCombatant> attackers)
+        {
+            foreach (var enemy in attackers)
+            {
+                if (_enemyUI.TryGetValue(enemy, out var ui))
+                {
+                    var rt = ui.spriteImage != null ? ui.spriteImage.rectTransform : ui.panelImage.rectTransform;
+                    PlaySfx("Hit");
+                    StartCoroutine(EnemyLunge(rt));
+                }
+                yield return new WaitForSecondsRealtime(0.15f);
+            }
+        }
+
+        /// <summary>Enemy lunges toward the player (down, since the player's HUD/hand sit
+        /// below the enemy row) and back, with a scale punch for impact.</summary>
+        private static IEnumerator EnemyLunge(RectTransform rt)
+        {
+            const float legDuration = 0.12f;
+            Vector2 startPos = rt.anchoredPosition;
+            Vector3 startScale = rt.localScale;
+            Vector2 lungePos = startPos + new Vector2(0, -18);
+            Vector3 lungeScale = startScale * 1.12f;
+
+            float t = 0f;
+            while (t < legDuration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = t / legDuration;
+                if (rt == null) yield break;
+                rt.anchoredPosition = Vector2.Lerp(startPos, lungePos, p);
+                rt.localScale = Vector3.Lerp(startScale, lungeScale, p);
+                yield return null;
+            }
+            t = 0f;
+            while (t < legDuration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = t / legDuration;
+                if (rt == null) yield break;
+                rt.anchoredPosition = Vector2.Lerp(lungePos, startPos, p);
+                rt.localScale = Vector3.Lerp(lungeScale, startScale, p);
+                yield return null;
+            }
+            if (rt != null) { rt.anchoredPosition = startPos; rt.localScale = startScale; }
         }
 
         private void OnCombatResultContinue()
@@ -324,9 +439,13 @@ namespace Talune.UI
 
             bool ongoing = _combat.Outcome == CombatOutcome.Ongoing;
             _endTurnButton.interactable = ongoing;
+            bool wasAlreadyShown = _resultOverlay.activeSelf;
             _resultOverlay.SetActive(!ongoing);
             if (!ongoing)
+            {
                 _resultText.text = _combat.Outcome == CombatOutcome.Victory ? "VICTORY\n\n(click to continue)" : "DEFEATED\n\n(click to continue)";
+                if (!wasAlreadyShown) PlaySfx(_combat.Outcome == CombatOutcome.Victory ? "Victory" : "Defeat"); // Only once, on the transition.
+            }
             RefreshHUD();
         }
 
@@ -345,10 +464,12 @@ namespace Talune.UI
             for (int i = _handContainer.childCount - 1; i >= 0; i--) DestroyImmediate(_handContainer.GetChild(i).gameObject);
             bool ongoing = _combat.Outcome == CombatOutcome.Ongoing;
 
+            int index = 0;
             foreach (var card in _combat.Deck.Hand)
             {
                 bool affordable = ongoing && _combat.Player.CanAfford(card.EnergyCost);
-                CreateCardButton(_handContainer, card, affordable, () => OnCardClicked(card));
+                CreateCardButton(_handContainer, card, affordable, (visual) => OnCardClicked(card, visual), entranceDelay: index * 0.05f);
+                index++;
             }
         }
 
@@ -446,8 +567,12 @@ namespace Talune.UI
             var container = screen.transform.Find("CardButtons");
             for (int i = container.childCount - 1; i >= 0; i--) DestroyImmediate(container.GetChild(i).gameObject);
 
+            int rewardIndex = 0;
             foreach (var card in cardChoices)
-                CreateCardButton(container, card, true, () => { _runState.AddCardToDeck(card); onDone(); });
+            {
+                CreateCardButton(container, card, true, (_) => { _runState.AddCardToDeck(card); onDone(); }, entranceDelay: rewardIndex * 0.08f);
+                rewardIndex++;
+            }
 
             var skipBtn = screen.transform.Find("SkipButton").GetComponent<Button>();
             skipBtn.onClick.RemoveAllListeners();
@@ -495,7 +620,7 @@ namespace Talune.UI
             foreach (var (card, price) in offer.CardsForSale)
             {
                 bool affordable = _runState.Fragments >= price;
-                var cardBtn = CreateCardButton(cardsContainer, card, affordable, () =>
+                var cardBtn = CreateCardButton(cardsContainer, card, affordable, (_) =>
                 {
                     if (KipShop.TryBuyCard(_runState, card, price)) RefreshShopScreen();
                 });
@@ -922,7 +1047,7 @@ namespace Talune.UI
 
         // --- Card button (shared by hand, rewards, and shop) ---
 
-        private Button CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction onClick)
+        private Button CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction<RectTransform> onClick, float entranceDelay = 0f)
         {
             var slot = CreateUIObject(card.CardName, parent);
             AddLayoutElement(slot, preferredWidth: 150, preferredHeight: 210);
@@ -933,7 +1058,6 @@ namespace Talune.UI
             var btn = slot.gameObject.AddComponent<Button>();
             btn.targetGraphic = hitArea;
             btn.interactable = affordable;
-            btn.onClick.AddListener(onClick);
 
             var visual = CreateUIObject("Visual", slot);
             StretchFull(visual);
@@ -996,8 +1120,35 @@ namespace Talune.UI
             bodyText.raycastTarget = false;
             StretchFull(bodyText.rectTransform);
 
+            btn.onClick.AddListener(() => onClick(visual));
             AddHoverRaise(slot, visual, sortingCanvas);
+            StartCoroutine(CardEntranceAnimation(visual, entranceDelay));
             return btn;
+        }
+
+        /// <summary>Cards pop in from slightly below and undersized instead of just
+        /// appearing - reads like they're being dealt/drawn rather than materializing.</summary>
+        private static IEnumerator CardEntranceAnimation(RectTransform visual, float delay)
+        {
+            if (delay > 0) yield return new WaitForSecondsRealtime(delay);
+            const float duration = 0.18f;
+            Vector3 fromScale = Vector3.one * 0.6f;
+            Vector2 fromPos = new(0, -40);
+            if (visual == null) yield break;
+            visual.localScale = fromScale;
+            visual.anchoredPosition = fromPos;
+
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (visual == null) yield break;
+                visual.localScale = Vector3.Lerp(fromScale, Vector3.one, p);
+                visual.anchoredPosition = Vector2.Lerp(fromPos, Vector2.zero, p);
+                yield return null;
+            }
+            if (visual != null) { visual.localScale = Vector3.one; visual.anchoredPosition = Vector2.zero; }
         }
 
         private void AddHoverRaise(RectTransform slot, RectTransform visual, Canvas sortingCanvas)
