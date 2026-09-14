@@ -4,6 +4,7 @@ using System.Linq;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.UI;
 using UnityEngine.UI;
 using Talune.Cards;
@@ -35,10 +36,19 @@ namespace Talune.UI
 
         // --- Combat-scoped state ---
         private CombatManager _combat;
-        private EnemyCombatant _selectedTarget;
         private RewardNodeType _pendingRewardType;
         private readonly List<string> _logLines = new();
-        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text)> _enemyUI = new();
+        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill)> _enemyUI = new();
+
+        // Click-a-card-then-click-a-target flow: a card needing an enemy target waits
+        // here until the player picks one (or cancels), rather than requiring a target
+        // to be pre-selected before a card can be played.
+        private CardData _pendingCard;
+        private RectTransform _pendingCardVisual;
+        private bool _awaitingTarget;
+
+        // --- Map progression ---
+        private readonly List<MapNodeType> _visitedPath = new();
 
         // --- Shared chrome ---
         private Text _hudText;
@@ -47,13 +57,17 @@ namespace Talune.UI
 
         // --- Combat screen refs ---
         private Text _playerStatsText;
+        private Image _playerHpFill;
         private Text _logText;
         private Button _endTurnButton;
+        private Text _instructionsText;
         private Transform _handContainer;
         private Transform _enemyRow;
         private GameObject _resultOverlay;
         private Text _resultText;
         private Button _resultOverlayButton;
+        private Text _drawPileText;
+        private Text _discardPileText;
 
         private static readonly Color PanelBg = new(0.14f, 0.14f, 0.18f);
         private static readonly Color CardUnaffordableTint = new(0.42f, 0.42f, 0.42f, 1f);
@@ -128,6 +142,64 @@ namespace Talune.UI
             StartNewRun();
         }
 
+        /// <summary>Hotkeys: 1-9 play the corresponding hand card (or, if it needs a
+        /// target, arm it exactly like clicking it would), Space/Enter ends the turn,
+        /// Escape cancels a pending target. Only live during an ongoing combat.</summary>
+        private void Update()
+        {
+            if (_combat == null || _combat.Outcome != CombatOutcome.Ongoing) return;
+            if (!_screens.TryGetValue("Combat", out var combatScreen) || !combatScreen.activeSelf) return;
+            var kb = Keyboard.current;
+            if (kb == null) return;
+
+            if (kb.escapeKey.wasPressedThisFrame && _pendingCard != null)
+            {
+                CancelPendingTarget();
+                return;
+            }
+
+            if ((kb.spaceKey.wasPressedThisFrame || kb.enterKey.wasPressedThisFrame) && _pendingCard == null)
+            {
+                OnEndTurnClicked();
+                return;
+            }
+
+            for (int digit = 1; digit <= 9; digit++)
+            {
+                if (DigitPressed(kb, digit))
+                {
+                    PlayHandCardAtIndex(digit - 1);
+                    break;
+                }
+            }
+        }
+
+        private static bool DigitPressed(Keyboard kb, int digit) => digit switch
+        {
+            1 => kb.digit1Key.wasPressedThisFrame,
+            2 => kb.digit2Key.wasPressedThisFrame,
+            3 => kb.digit3Key.wasPressedThisFrame,
+            4 => kb.digit4Key.wasPressedThisFrame,
+            5 => kb.digit5Key.wasPressedThisFrame,
+            6 => kb.digit6Key.wasPressedThisFrame,
+            7 => kb.digit7Key.wasPressedThisFrame,
+            8 => kb.digit8Key.wasPressedThisFrame,
+            9 => kb.digit9Key.wasPressedThisFrame,
+            _ => false,
+        };
+
+        /// <summary>Mirrors clicking the card at this hand slot - same targeting rules apply.</summary>
+        private void PlayHandCardAtIndex(int index)
+        {
+            if (_cardActionInProgress) return;
+            var hand = _combat.Deck.Hand;
+            if (index < 0 || index >= hand.Count || index >= _handContainer.childCount) return;
+            var card = hand[index];
+            if (!_combat.Player.CanAfford(card.EnergyCost)) return;
+            var visual = _handContainer.GetChild(index).Find("Visual") as RectTransform;
+            if (visual != null) OnCardClicked(card, visual);
+        }
+
         // ============================================================
         // Run lifecycle
         // ============================================================
@@ -141,6 +213,7 @@ namespace Talune.UI
             _relicPool = DefaultContent.BuildStarterRelicPool();
             _player = new PlayerCombatant(BaselineNumbers.RookMaxHP, BaselineNumbers.PlayerMaxEnergy);
             _map = MapGenerator.Generate(rowCount: 13, nodesPerRow: 3, rng: _rng);
+            _visitedPath.Clear();
 
             ShowMapScreen();
         }
@@ -159,6 +232,30 @@ namespace Talune.UI
             ShowScreen("Map");
             RefreshHUD();
 
+            // Path trail: a breadcrumb of every node type visited so far this Act, so
+            // arriving at the map actually reads as "how far in you are" rather than a
+            // context-free choice every time.
+            var trail = _screens["Map"].transform.Find("PathTrail");
+            for (int i = trail.childCount - 1; i >= 0; i--) DestroyImmediate(trail.GetChild(i).gameObject);
+            foreach (var visited in _visitedPath)
+            {
+                var dotRT = CreateUIObject("Dot", trail);
+                AddLayoutElement(dotRT, preferredWidth: 20, preferredHeight: 20);
+                var dotImg = dotRT.gameObject.AddComponent<Image>();
+                dotImg.color = NodeTypeColor.GetValueOrDefault(visited, Color.gray);
+            }
+            if (_visitedPath.Count > 0)
+            {
+                var arrowRT = CreateUIObject("Arrow", trail);
+                AddLayoutElement(arrowRT, preferredWidth: 20, preferredHeight: 20);
+                var arrowText = CreateText(arrowRT, "▶", 16, TextAnchor.MiddleCenter, new Color(0.8f, 0.8f, 0.8f));
+                StretchFull(arrowText.rectTransform);
+            }
+            var hereRT = CreateUIObject("Here", trail);
+            AddLayoutElement(hereRT, preferredWidth: 24, preferredHeight: 24);
+            var hereImg = hereRT.gameObject.AddComponent<Image>();
+            hereImg.color = new Color(0.95f, 0.85f, 0.3f); // Rook's current position.
+
             var container = _screens["Map"].transform.Find("NodeButtons");
             for (int i = container.childCount - 1; i >= 0; i--) DestroyImmediate(container.GetChild(i).gameObject);
 
@@ -169,7 +266,9 @@ namespace Talune.UI
 
             foreach (var node in _map.AvailableNextNodes())
             {
-                var btn = CreateButton(container, "", () => OnMapNodeClicked(node), NodeTypeColor.GetValueOrDefault(node.NodeType, new Color(0.3f, 0.3f, 0.3f)), fontSize: 16);
+                Button btn = null;
+                btn = CreateButton(container, "", () => OnMapNodeClicked(node, btn.GetComponent<RectTransform>()),
+                    NodeTypeColor.GetValueOrDefault(node.NodeType, new Color(0.3f, 0.3f, 0.3f)), fontSize: 16);
                 AddLayoutElement(btn.GetComponent<RectTransform>(), preferredWidth: 220, preferredHeight: 100);
                 var label = btn.GetComponentInChildren<Text>();
                 label.text = $"{node.DisplayLabel}\n{NodeFlavor(node.NodeType)}";
@@ -191,9 +290,26 @@ namespace Talune.UI
             _ => "",
         };
 
-        private void OnMapNodeClicked(MapNode node)
+        private void OnMapNodeClicked(MapNode node, RectTransform buttonRT)
         {
+            StartCoroutine(TravelThenResolve(node, buttonRT));
+        }
+
+        /// <summary>Brief "stepping onto the node" punch before actually resolving it,
+        /// so choosing a path reads as travelling through Talune rather than an instant
+        /// menu-swap. The full node graph (not just the next row) is a bigger future
+        /// upgrade - this at least makes each step feel like a step.</summary>
+        private IEnumerator TravelThenResolve(MapNode node, RectTransform buttonRT)
+        {
+            PlaySfx("CardPlay"); // Reused as a travel "whoosh" - distinct SFX can follow later.
+            yield return PunchScale(buttonRT);
+            _visitedPath.Add(node.NodeType);
             _map.TryMoveTo(node.Id);
+            ResolveMapNode(node);
+        }
+
+        private void ResolveMapNode(MapNode node)
+        {
             switch (node.NodeType)
             {
                 case MapNodeType.Combat:
@@ -248,7 +364,9 @@ namespace Talune.UI
             _logLines.Clear();
             _combat = new CombatManager(_player, enemies, _runState.Deck, _rng, _runState.Relics);
             _combat.OnLog += AppendLog;
-            _selectedTarget = enemies.FirstOrDefault();
+            _pendingCard = null;
+            _pendingCardVisual = null;
+            _awaitingTarget = false;
 
             BuildEnemyPanels(enemies);
             ShowScreen("Combat");
@@ -263,16 +381,57 @@ namespace Talune.UI
             if (_logLines.Count > 200) _logLines.RemoveAt(0);
         }
 
-        /// <summary>Click handler for a hand card: plays a brief "cast" animation on the
-        /// clicked card BEFORE resolving it, so the card is actually seen being used
-        /// rather than instantly vanishing into a rebuilt hand.</summary>
+        /// <summary>Click handler for a hand card. If the card needs an enemy target
+        /// (a Single/SecondEnemy-targeted effect) and there's more than one living
+        /// enemy to choose between, it ARMS instead of playing immediately - the player
+        /// then clicks the enemy they want to hit. Cards that don't need a choice (Guard/
+        /// Skill/Power, or only one enemy is alive) just play straight away.</summary>
         private void OnCardClicked(CardData card, RectTransform visual)
         {
             if (_cardActionInProgress) return;
-            StartCoroutine(PlayCardSequence(card, visual));
+
+            // Clicking the already-armed card again cancels it, matching Escape's behavior.
+            if (_pendingCard == card && _pendingCardVisual == visual) { CancelPendingTarget(); return; }
+            if (_pendingCard != null) CancelPendingTarget();
+
+            var livingEnemies = _combat.Enemies.Where(e => !e.IsDead).ToList();
+            bool needsChoice = livingEnemies.Count > 1 && card.Effects.Any(e => e.Target == TargetType.SingleEnemy || e.Target == TargetType.SecondEnemy);
+
+            if (needsChoice)
+            {
+                _pendingCard = card;
+                _pendingCardVisual = visual;
+                _awaitingTarget = true;
+                StopAndStartTween(visual, TweenCard(visual, new Vector2(0, 24), new Vector3(1.15f, 1.15f, 1f))); // Lift and hold, so it's visibly "armed".
+                _instructionsText.text = $"Choose a target for {card.CardName} - click an enemy (or press Escape / click the card again to cancel).";
+                // NOT RefreshCombatUI() - that calls RebuildHand(), which destroys every
+                // hand card (including the one we just armed) and creates fresh ones,
+                // leaving _pendingCardVisual pointing at a destroyed object. Arming only
+                // changes enemy highlighting, not hand contents, so only refresh that.
+                RefreshEnemyPanels();
+                return;
+            }
+
+            var target = livingEnemies.FirstOrDefault();
+            StartCoroutine(PlayCardSequence(card, visual, target));
         }
 
-        private IEnumerator PlayCardSequence(CardData card, RectTransform visual)
+        private void CancelPendingTarget()
+        {
+            if (_pendingCardVisual != null) StopAndStartTween(_pendingCardVisual, TweenCard(_pendingCardVisual, Vector2.zero, Vector3.one));
+            _pendingCard = null;
+            _pendingCardVisual = null;
+            _awaitingTarget = false;
+            ResetInstructionsText();
+            RefreshEnemyPanels(); // Same reasoning as above - don't touch the hand here.
+        }
+
+        private void ResetInstructionsText()
+        {
+            _instructionsText.text = "HOW TO PLAY:  Click a card to play it (or press 1-9).  If it needs a target, click the enemy to hit.  Press SPACE/ENTER or click END TURN when done.";
+        }
+
+        private IEnumerator PlayCardSequence(CardData card, RectTransform visual, EnemyCombatant target)
         {
             _cardActionInProgress = true;
             PlaySfx("CardPlay");
@@ -280,7 +439,7 @@ namespace Talune.UI
 
             var hpBefore = _combat.Enemies.ToDictionary(e => e, e => e.CurrentHP);
             bool hasBlockEffect = card.Effects.Any(e => e.Kind == CardEffectKind.Block);
-            _combat.TryPlayCard(card, _selectedTarget);
+            _combat.TryPlayCard(card, target);
             RefreshCombatUI(); // Destroys/rebuilds the hand - visual (now used) is gone after this.
 
             bool anyHit = false;
@@ -319,16 +478,27 @@ namespace Talune.UI
             }
         }
 
+        /// <summary>Clicking an enemy only matters while a card is armed and waiting
+        /// for a target (see OnCardClicked) - it confirms and plays that card on this
+        /// enemy. Otherwise a click is a no-op (there's nothing to "pre-select" anymore).</summary>
         private void OnEnemyClicked(EnemyCombatant enemy)
         {
             if (enemy.IsDead || _cardActionInProgress) return;
-            _selectedTarget = enemy;
-            RefreshCombatUI();
+            if (_pendingCard == null) return;
+
+            var card = _pendingCard;
+            var visual = _pendingCardVisual;
+            _pendingCard = null;
+            _pendingCardVisual = null;
+            _awaitingTarget = false;
+            ResetInstructionsText();
+            StartCoroutine(PlayCardSequence(card, visual, enemy));
         }
 
         private void OnEndTurnClicked()
         {
             if (_cardActionInProgress) return;
+            if (_pendingCard != null) CancelPendingTarget(); // Ending turn abandons an unconfirmed target.
             int hpBefore = _combat.Player.CurrentHP;
             // Snapshot BEFORE resolving - by the time EndPlayerTurn() returns, each enemy's
             // NextIntent has already been overwritten with what they'll do NEXT turn, so
@@ -336,8 +506,6 @@ namespace Talune.UI
             var attackers = _combat.Enemies.Where(e => !e.IsDead && e.NextIntent.Category == IntentCategory.Attack).ToList();
 
             _combat.EndPlayerTurn();
-            if (_combat.Outcome == CombatOutcome.Ongoing && (_selectedTarget == null || _selectedTarget.IsDead))
-                _selectedTarget = _combat.Enemies.FirstOrDefault(e => !e.IsDead);
             RefreshCombatUI();
 
             if (_combat.Player.CurrentHP < hpBefore)
@@ -414,6 +582,27 @@ namespace Talune.UI
             }
         }
 
+        /// <summary>Updates enemy panels only (color, text, health bar) - deliberately
+        /// separate from RefreshCombatUI/RebuildHand so arming or cancelling a target
+        /// doesn't tear down and recreate the hand out from under itself.</summary>
+        private void RefreshEnemyPanels()
+        {
+            foreach (var enemy in _combat.Enemies)
+            {
+                if (!_enemyUI.TryGetValue(enemy, out var ui)) continue;
+                // While a card is armed and waiting for a target, every living enemy is a
+                // valid click target - highlight all of them, not just one "selected" one.
+                bool targetable = _awaitingTarget && !enemy.IsDead;
+                ui.panelImage.color = enemy.IsDead ? new Color(0.08f, 0.08f, 0.08f) : targetable ? TargetSelectedBg : TargetBg;
+                if (ui.spriteImage != null) ui.spriteImage.color = enemy.IsDead ? new Color(1, 1, 1, 0.25f) : Color.white;
+                ui.text.text = enemy.IsDead
+                    ? $"{enemy.DisplayName}\n(defeated)"
+                    : (targetable ? "◆ CLICK TO TARGET ◆\n" : "") +
+                      $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
+                if (ui.hpFill != null) SetHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP);
+            }
+        }
+
         private void RefreshCombatUI()
         {
             var p = _combat.Player;
@@ -421,21 +610,12 @@ namespace Talune.UI
                 (p.GetStacks(StatusEffectType.Growth) > 0 ? $"   Growth {p.GetStacks(StatusEffectType.Growth)}" : "") +
                 (p.GetStacks(StatusEffectType.Thorns) > 0 ? $"   Thorns {p.GetStacks(StatusEffectType.Thorns)}" : "") +
                 (p.GetStacks(StatusEffectType.Burn) > 0 ? $"   Burn {p.GetStacks(StatusEffectType.Burn)}" : "");
-
-            foreach (var enemy in _combat.Enemies)
-            {
-                if (!_enemyUI.TryGetValue(enemy, out var ui)) continue;
-                bool selected = enemy == _selectedTarget;
-                ui.panelImage.color = enemy.IsDead ? new Color(0.08f, 0.08f, 0.08f) : selected ? TargetSelectedBg : TargetBg;
-                if (ui.spriteImage != null) ui.spriteImage.color = enemy.IsDead ? new Color(1, 1, 1, 0.25f) : Color.white;
-                ui.text.text = enemy.IsDead
-                    ? $"{enemy.DisplayName}\n(defeated)"
-                    : (selected ? "▶ TARGETED ◀\n" : "(click to target)\n") +
-                      $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
-            }
-
+            SetHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP);
+            RefreshEnemyPanels();
             RebuildHand();
             _logText.text = string.Join("\n", _logLines.TakeLast(6));
+            _drawPileText.text = _combat.Deck.DrawPileCount.ToString();
+            _discardPileText.text = _combat.Deck.DiscardPileCount.ToString();
 
             bool ongoing = _combat.Outcome == CombatOutcome.Ongoing;
             _endTurnButton.interactable = ongoing;
@@ -447,6 +627,16 @@ namespace Talune.UI
                 if (!wasAlreadyShown) PlaySfx(_combat.Outcome == CombatOutcome.Victory ? "Victory" : "Defeat"); // Only once, on the transition.
             }
             RefreshHUD();
+        }
+
+        /// <summary>Green at full HP, sliding to red as it drops - color plus the fill
+        /// bar itself, so health reads at a glance instead of requiring reading numbers.</summary>
+        private static void SetHealthBarFill(Image fillImg, int current, int max)
+        {
+            if (fillImg == null) return;
+            float pct = max > 0 ? Mathf.Clamp01((float)current / max) : 0f;
+            fillImg.fillAmount = pct;
+            fillImg.color = Color.Lerp(new Color(0.75f, 0.15f, 0.15f), new Color(0.25f, 0.75f, 0.25f), pct);
         }
 
         private static string DescribeIntent(EnemyIntent intent) => intent.Category switch
@@ -468,7 +658,7 @@ namespace Talune.UI
             foreach (var card in _combat.Deck.Hand)
             {
                 bool affordable = ongoing && _combat.Player.CanAfford(card.EnergyCost);
-                CreateCardButton(_handContainer, card, affordable, (visual) => OnCardClicked(card, visual), entranceDelay: index * 0.05f);
+                CreateCardButton(_handContainer, card, affordable, (visual) => OnCardClicked(card, visual), entranceDelay: index * 0.05f, hotkeyNumber: index < 9 ? index + 1 : null);
                 index++;
             }
         }
@@ -504,9 +694,31 @@ namespace Talune.UI
                     spriteImg.raycastTarget = false;
                 }
 
+                // Health bar - sits in the band between the sprite and the stats text.
+                var barBgRT = CreateUIObject("HealthBarBg", panelRT);
+                barBgRT.anchorMin = new Vector2(0.10f, 0.30f);
+                barBgRT.anchorMax = new Vector2(0.90f, 0.37f);
+                barBgRT.offsetMin = Vector2.zero;
+                barBgRT.offsetMax = Vector2.zero;
+                var barBgImg = barBgRT.gameObject.AddComponent<Image>();
+                barBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
+                barBgImg.raycastTarget = false;
+                var barFillRT = CreateUIObject("HealthBarFill", barBgRT);
+                barFillRT.anchorMin = Vector2.zero;
+                barFillRT.anchorMax = Vector2.one;
+                barFillRT.offsetMin = new Vector2(2, 2);
+                barFillRT.offsetMax = new Vector2(-2, -2);
+                var hpFillImg = barFillRT.gameObject.AddComponent<Image>();
+                hpFillImg.type = Image.Type.Filled;
+                hpFillImg.fillMethod = Image.FillMethod.Horizontal;
+                hpFillImg.fillOrigin = (int)Image.OriginHorizontal.Left;
+                hpFillImg.fillAmount = 1f;
+                hpFillImg.color = Color.green;
+                hpFillImg.raycastTarget = false;
+
                 var textRT = CreateUIObject("Text", panelRT);
                 textRT.anchorMin = new Vector2(0, 0);
-                textRT.anchorMax = new Vector2(1, sprite != null ? 0.42f : 1f);
+                textRT.anchorMax = new Vector2(1, sprite != null ? 0.29f : 1f);
                 textRT.offsetMin = Vector2.zero;
                 textRT.offsetMax = Vector2.zero;
                 var text = textRT.gameObject.AddComponent<Text>();
@@ -518,7 +730,7 @@ namespace Talune.UI
                 text.verticalOverflow = VerticalWrapMode.Overflow;
                 text.raycastTarget = false;
 
-                _enemyUI[enemy] = (img, spriteImg, text);
+                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg);
             }
         }
 
@@ -798,6 +1010,14 @@ namespace Talune.UI
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
 
+            var trailRT = CreateUIObject("PathTrail", screen);
+            AddLayoutElement(trailRT, preferredHeight: 26);
+            var trailLayout = trailRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            trailLayout.spacing = 6;
+            trailLayout.childAlignment = TextAnchor.MiddleCenter;
+            trailLayout.childForceExpandWidth = false;
+            trailLayout.childForceExpandHeight = false;
+
             var title = CreateText(screen, "Choose your next step:", 22, TextAnchor.MiddleCenter);
             title.name = "Title";
             AddLayoutElement(title.rectTransform, preferredHeight: 40);
@@ -828,9 +1048,9 @@ namespace Talune.UI
             AddLayoutElement(instructionsRT, preferredHeight: 40);
             var instructionsImg = instructionsRT.gameObject.AddComponent<Image>();
             instructionsImg.color = new Color(0.10f, 0.13f, 0.10f);
-            var instructionsText = CreateText(instructionsRT, "HOW TO PLAY:  1) Click an enemy panel below to target it.   2) Click a card in your hand to play it (colored by type: red=Attack, blue=Guard, green=Skill).   3) Click END TURN when done.   \"Will do:\" on an enemy shows what it plays next.",
-                14, TextAnchor.MiddleCenter, new Color(0.85f, 0.9f, 0.85f));
-            StretchFull(instructionsText.rectTransform);
+            _instructionsText = CreateText(instructionsRT, "", 14, TextAnchor.MiddleCenter, new Color(0.85f, 0.9f, 0.85f));
+            StretchFull(_instructionsText.rectTransform);
+            ResetInstructionsText();
 
             var enemyRowRT = CreateUIObject("EnemyRow", screen);
             AddLayoutElement(enemyRowRT, preferredHeight: 230);
@@ -861,17 +1081,48 @@ namespace Talune.UI
             statsLayout.childForceExpandWidth = false;
             _playerStatsText = CreateText(statsRowRT, "", 18, TextAnchor.MiddleLeft);
             AddLayoutElement(_playerStatsText.rectTransform, flexibleWidth: 1, preferredHeight: 30);
-            _endTurnButton = CreateButton(statsRowRT, "END TURN", OnEndTurnClicked, new Color(0.25f, 0.2f, 0.1f));
-            AddLayoutElement(_endTurnButton.GetComponent<RectTransform>(), preferredWidth: 160, preferredHeight: 30);
+            _endTurnButton = CreateButton(statsRowRT, "END TURN (Space)", OnEndTurnClicked, new Color(0.25f, 0.2f, 0.1f));
+            AddLayoutElement(_endTurnButton.GetComponent<RectTransform>(), preferredWidth: 180, preferredHeight: 30);
 
-            var handRowRT = CreateUIObject("HandRow", bottomBarRT);
-            AddLayoutElement(handRowRT, flexibleHeight: 1);
+            // Player health bar - own row, just under the stats line.
+            var playerBarBgRT = CreateUIObject("PlayerHealthBarBg", bottomBarRT);
+            AddLayoutElement(playerBarBgRT, preferredHeight: 10);
+            var playerBarBgImg = playerBarBgRT.gameObject.AddComponent<Image>();
+            playerBarBgImg.color = new Color(0.08f, 0.08f, 0.08f, 0.9f);
+            var playerBarFillRT = CreateUIObject("Fill", playerBarBgRT);
+            playerBarFillRT.anchorMin = Vector2.zero;
+            playerBarFillRT.anchorMax = Vector2.one;
+            playerBarFillRT.offsetMin = new Vector2(2, 2);
+            playerBarFillRT.offsetMax = new Vector2(-2, -2);
+            _playerHpFill = playerBarFillRT.gameObject.AddComponent<Image>();
+            _playerHpFill.type = Image.Type.Filled;
+            _playerHpFill.fillMethod = Image.FillMethod.Horizontal;
+            _playerHpFill.fillOrigin = (int)Image.OriginHorizontal.Left;
+            _playerHpFill.fillAmount = 1f;
+            _playerHpFill.color = Color.green;
+
+            // Hand area: draw pile | hand (fanned) | discard pile - a real deck of cards,
+            // not just a floating row.
+            var handAreaRT = CreateUIObject("HandArea", bottomBarRT);
+            AddLayoutElement(handAreaRT, flexibleHeight: 1);
+            var handAreaLayout = handAreaRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            handAreaLayout.spacing = 12;
+            handAreaLayout.childAlignment = TextAnchor.MiddleCenter;
+            handAreaLayout.childForceExpandWidth = false;
+            handAreaLayout.childForceExpandHeight = false;
+
+            CreatePileWidget(handAreaRT, "DRAW", out _drawPileText);
+
+            var handRowRT = CreateUIObject("HandRow", handAreaRT);
+            AddLayoutElement(handRowRT, flexibleWidth: 1, preferredHeight: 210);
             var handLayout = handRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
             handLayout.spacing = -35;
             handLayout.childAlignment = TextAnchor.LowerCenter;
             handLayout.childForceExpandWidth = false;
             handLayout.childForceExpandHeight = false;
             _handContainer = handRowRT;
+
+            CreatePileWidget(handAreaRT, "DISCARD", out _discardPileText);
 
             var overlayRT = CreateUIObject("ResultOverlay", screen.transform.parent); // Overlay sits above ScreenContainer, not inside CombatScreen's own layout.
             StretchFull(overlayRT);
@@ -1045,9 +1296,33 @@ namespace Talune.UI
             rt.gameObject.SetActive(false);
         }
 
+        /// <summary>A small card-back-styled stack with a count, for the draw/discard piles -
+        /// makes the hand read as drawn FROM and discarded TO somewhere physical.</summary>
+        private RectTransform CreatePileWidget(Transform parent, string label, out Text countText)
+        {
+            var rt = CreateUIObject($"{label}Pile", parent);
+            AddLayoutElement(rt, preferredWidth: 66, preferredHeight: 92);
+            var img = rt.gameObject.AddComponent<Image>();
+            img.sprite = _cardFrameSprite;
+            img.color = new Color(0.55f, 0.55f, 0.6f, 0.9f);
+
+            var labelText = CreateText(rt, label, 10, TextAnchor.UpperCenter, new Color(0.2f, 0.15f, 0.1f));
+            labelText.rectTransform.anchorMin = new Vector2(0.05f, 0.68f);
+            labelText.rectTransform.anchorMax = new Vector2(0.95f, 0.95f);
+            labelText.rectTransform.offsetMin = Vector2.zero;
+            labelText.rectTransform.offsetMax = Vector2.zero;
+
+            countText = CreateText(rt, "0", 22, TextAnchor.MiddleCenter, new Color(0.15f, 0.1f, 0.05f));
+            countText.rectTransform.anchorMin = new Vector2(0.05f, 0.15f);
+            countText.rectTransform.anchorMax = new Vector2(0.95f, 0.65f);
+            countText.rectTransform.offsetMin = Vector2.zero;
+            countText.rectTransform.offsetMax = Vector2.zero;
+            return rt;
+        }
+
         // --- Card button (shared by hand, rewards, and shop) ---
 
-        private Button CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction<RectTransform> onClick, float entranceDelay = 0f)
+        private Button CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction<RectTransform> onClick, float entranceDelay = 0f, int? hotkeyNumber = null)
         {
             var slot = CreateUIObject(card.CardName, parent);
             AddLayoutElement(slot, preferredWidth: 150, preferredHeight: 210);
@@ -1069,6 +1344,26 @@ namespace Talune.UI
             frameImg.color = affordable ? Color.white : CardUnaffordableTint;
             frameImg.type = Image.Type.Simple;
             frameImg.raycastTarget = false;
+
+            if (hotkeyNumber.HasValue)
+            {
+                // Bottom-left, not top-right: cards overlap by ~35px on their RIGHT edge
+                // (later siblings draw over earlier ones there), so anything placed in
+                // that band is only ever visible on the last card in the fan. The left
+                // side is always clear.
+                var hotkeyRT = CreateUIObject("HotkeyBadge", visual);
+                hotkeyRT.anchorMin = new Vector2(0f, 0.08f);
+                hotkeyRT.anchorMax = new Vector2(0f, 0.08f);
+                hotkeyRT.pivot = new Vector2(0.5f, 0.5f);
+                hotkeyRT.sizeDelta = new Vector2(26, 26);
+                hotkeyRT.anchoredPosition = new Vector2(18, 14);
+                var hotkeyImg = hotkeyRT.gameObject.AddComponent<Image>();
+                hotkeyImg.color = new Color(0.1f, 0.1f, 0.1f, 0.85f);
+                hotkeyImg.raycastTarget = false;
+                var hotkeyText = CreateText(hotkeyRT, hotkeyNumber.Value.ToString(), 14, TextAnchor.MiddleCenter, new Color(0.9f, 0.85f, 0.5f));
+                hotkeyText.raycastTarget = false;
+                StretchFull(hotkeyText.rectTransform);
+            }
 
             var icon = GetCardIcon(card.Type);
             if (icon != null)
