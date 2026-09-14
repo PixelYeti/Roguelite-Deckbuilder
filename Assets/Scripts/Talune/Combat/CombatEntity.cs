@@ -102,6 +102,12 @@ namespace Talune.Combat
 
         public void RemoveStatus(StatusEffectType type) => _statusEffects.Remove(type);
 
+        /// <summary>Call on the player between fights in a run: HP and Block persist
+        /// (Block already resets naturally at turn start), but Power-type effects like
+        /// Growth/Thorns/Burn are scoped to "for the combat" per the master prompt's
+        /// POWER card type - they should not leak into the next fight.</summary>
+        public void ClearCombatScopedStatuses() => _statusEffects.Clear();
+
         /// <summary>Fix 3: Burn ticks (deals damage, then -1) at the start of the owner's own turn.</summary>
         public void TickStartOfTurnStatuses()
         {
