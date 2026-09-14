@@ -2734,6 +2734,20 @@ namespace Talune.UI
             var sortingCanvas = visual.gameObject.AddComponent<Canvas>();
             sortingCanvas.overrideSorting = false;
 
+            // Solid card face, sized to the frame's inner cutout - CardFrame.png's center
+            // is genuinely transparent (see the checkerboard in the source art), so without
+            // this the icon/type/body text were rendering directly over whatever sat behind
+            // the card (the hand area's background, or another card), which is how dark
+            // body text ended up on a dark, uneven backdrop and became unreadable.
+            var faceRT = CreateUIObject("CardFace", visual);
+            faceRT.anchorMin = new Vector2(0.14f, 0.06f);
+            faceRT.anchorMax = new Vector2(0.86f, 0.95f);
+            faceRT.offsetMin = Vector2.zero;
+            faceRT.offsetMax = Vector2.zero;
+            var faceImg = faceRT.gameObject.AddComponent<Image>();
+            faceImg.color = PanelBg;
+            faceImg.raycastTarget = false;
+
             var frameImg = visual.gameObject.AddComponent<Image>();
             frameImg.sprite = _cardFrameSprite;
             frameImg.color = affordable ? Color.white : CardUnaffordableTint;
@@ -2810,7 +2824,11 @@ namespace Talune.UI
             bodyRT.offsetMin = Vector2.zero;
             bodyRT.offsetMax = Vector2.zero;
             var kinLabel = card.KinTags.Count > 0 ? $" [{string.Join("+", card.KinTags)}]" : "";
-            var bodyText = CreateText(bodyRT, $"{card.CardName}{kinLabel}\n{card.Description}", 12, TextAnchor.UpperCenter, new Color(0.15f, 0.1f, 0.05f));
+            // Bright name, dimmer description - was one flat near-black color for both on
+            // the old (transparent) card face, which read as illegible even before the
+            // CardFace fix above; rich-text size/color tags give the name a clear lead-in
+            // without needing a second Text component.
+            var bodyText = CreateText(bodyRT, $"<size=13><color=#F0DFAE>{card.CardName}{kinLabel}</color></size>\n<color=#C9C2B4>{card.Description}</color>", 12, TextAnchor.UpperCenter, Color.white);
             bodyText.raycastTarget = false;
             StretchFull(bodyText.rectTransform);
 
