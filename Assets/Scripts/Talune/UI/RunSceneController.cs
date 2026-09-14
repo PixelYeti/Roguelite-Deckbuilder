@@ -33,6 +33,18 @@ namespace Talune.UI
         private System.Random _rng;
         private List<CardData> _cardPool;
         private List<RelicData> _relicPool;
+        private int _actIndex; // 0-based; ActCount - 1 is the final Act's Boss.
+        private int _nodesCompletedThisRun;
+        private bool _essenceAwardedThisRun;
+        private const int ActCount = 3;
+
+        // --- Pause menu ---
+        private bool _pauseMenuOpen;
+        private GameObject _pauseOverlay;
+        private GameObject _pauseConfirmRow;
+
+        // --- Tutorial (shown once ever, before the player's very first combat) ---
+        private const string TutorialSeenKey = "Talune_SeenTutorial";
 
         // --- Combat-scoped state ---
         private CombatManager _combat;
@@ -72,6 +84,7 @@ namespace Talune.UI
         private RectTransform _backgroundRT;
         private Image _backgroundImg;
         private Text _mapTooltipText;
+        private Text _relicTooltipText;
         private Font _pixelFont;
         private AudioSource _musicSource;
         private Image _transitionOverlayImg;
@@ -150,6 +163,8 @@ namespace Talune.UI
         private Sprite _cardFrameSprite;
         private Sprite _combatBackgroundSprite;
         private Sprite _mapBackgroundSprite;
+        private Sprite _act2BackgroundSprite;
+        private Sprite _act3BackgroundSprite;
         private Sprite _panelFrameSprite;
         private Sprite _buttonFrameSprite;
         private Sprite _mapNodeFrameSprite;
@@ -205,6 +220,8 @@ namespace Talune.UI
             _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
             _combatBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/CombatBackground");
             _mapBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/MapBackground");
+            _act2BackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/Act2Background");
+            _act3BackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/Act3Background");
             _panelFrameSprite = Resources.Load<Sprite>("Art/UI/PanelFrame");
             _buttonFrameSprite = Resources.Load<Sprite>("Art/UI/ButtonFrame");
             _mapNodeFrameSprite = Resources.Load<Sprite>("Art/UI/MapNodeFrame");
@@ -226,19 +243,25 @@ namespace Talune.UI
 
         /// <summary>Hotkeys: 1-9 play the corresponding hand card (or, if it needs a
         /// target, arm it exactly like clicking it would), Space/Enter ends the turn,
-        /// Escape cancels a pending target. Only live during an ongoing combat.</summary>
+        /// Escape cancels a pending target during combat or otherwise opens/closes the
+        /// pause menu - which itself works from any screen, not just combat.</summary>
         private void Update()
         {
-            if (_combat == null || _combat.Outcome != CombatOutcome.Ongoing) return;
-            if (!_screens.TryGetValue("Combat", out var combatScreen) || !combatScreen.activeSelf) return;
             var kb = Keyboard.current;
             if (kb == null) return;
 
-            if (kb.escapeKey.wasPressedThisFrame && _pendingCard != null)
+            if (kb.escapeKey.wasPressedThisFrame)
             {
-                CancelPendingTarget();
+                bool inCombat = _combat != null && _combat.Outcome == CombatOutcome.Ongoing
+                    && _screens.TryGetValue("Combat", out var cs) && cs.activeSelf;
+                if (inCombat && _pendingCard != null) { CancelPendingTarget(); return; }
+                TogglePauseMenu();
                 return;
             }
+
+            if (_pauseMenuOpen) return; // Don't let combat hotkeys leak through while paused.
+            if (_combat == null || _combat.Outcome != CombatOutcome.Ongoing) return;
+            if (!_screens.TryGetValue("Combat", out var combatScreen) || !combatScreen.activeSelf) return;
 
             if ((kb.spaceKey.wasPressedThisFrame || kb.enterKey.wasPressedThisFrame) && _pendingCard == null)
             {
@@ -293,16 +316,32 @@ namespace Talune.UI
             _runState.Deck.AddRange(DefaultContent.BuildStarterDeck());
             _cardPool = DefaultContent.BuildRewardPool();
             _relicPool = DefaultContent.BuildStarterRelicPool();
+            if (MetaProgress.RelicUnlocked) _relicPool.Add(DefaultContent.CreateEssenceRelic());
+            if (MetaProgress.CardUnlocked) _cardPool.Add(DefaultContent.EssenceBurst());
             _player = new PlayerCombatant(BaselineNumbers.RookMaxHP, BaselineNumbers.PlayerMaxEnergy);
+            _actIndex = 0;
+            _nodesCompletedThisRun = 0;
+            _essenceAwardedThisRun = false;
             _map = MapGenerator.Generate(rowCount: 13, nodesPerRow: 3, rng: _rng);
             _traveledEdges.Clear();
 
             ShowMapScreen();
         }
 
+        /// <summary>Called when an Act's Boss is defeated and Acts remain - keeps
+        /// RunState/deck/relics/HP, generates a fresh board for the next Act, and shows
+        /// a brief transition message rather than ending the run.</summary>
+        private void AdvanceToNextAct()
+        {
+            _actIndex++;
+            _map = MapGenerator.Generate(rowCount: 13, nodesPerRow: 3, rng: _rng);
+            _traveledEdges.Clear();
+            ShowMessage($"Act {_actIndex + 1} of {ActCount}", "Talune's next stretch unfolds ahead of you.", 0, ShowMapScreen);
+        }
+
         private void RefreshHUD()
         {
-            _hudText.text = $"Rook  HP {_player.CurrentHP}/{_player.MaxHP}    Fragments {_runState.Fragments}    Deck {_runState.Deck.Count}    Relics {_runState.Relics.Count}";
+            _hudText.text = $"Rook  HP {_player.CurrentHP}/{_player.MaxHP}    Fragments {_runState.Fragments}    Deck {_runState.Deck.Count}    Relics {_runState.Relics.Count}    Act {_actIndex + 1}/{ActCount}";
 
             if (_relicRow == null) return;
             for (int i = _relicRow.childCount - 1; i >= 0; i--) DestroyImmediate(_relicRow.GetChild(i).gameObject);
@@ -316,6 +355,16 @@ namespace Talune.UI
                 AddDropShadow(img, new Vector2(2, -2), 0.5f);
                 var txt = CreateText(badgeRT, relic.RelicName.Length > 0 ? relic.RelicName[0].ToString() : "?", 12, TextAnchor.MiddleCenter, new Color(1f, 0.92f, 0.7f), pixelFont: true);
                 StretchFull(txt.rectTransform);
+
+                // Same fix as the map nodes: an icon/initial alone doesn't say what it is - hover reveals the full name + description.
+                var capturedRelic = relic;
+                var trigger = badgeRT.gameObject.AddComponent<EventTrigger>();
+                var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+                enter.callback.AddListener(_ => { if (_relicTooltipText != null) _relicTooltipText.text = $"{capturedRelic.RelicName} - {capturedRelic.Description}"; });
+                trigger.triggers.Add(enter);
+                var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+                exit.callback.AddListener(_ => { if (_relicTooltipText != null) _relicTooltipText.text = ""; });
+                trigger.triggers.Add(exit);
             }
         }
 
@@ -584,9 +633,13 @@ namespace Talune.UI
             switch (node.NodeType)
             {
                 case MapNodeType.Combat:
-                    var basicEnemies = _rng.Next(2) == 0
-                        ? new List<EnemyCombatant> { DefaultContent.CreateMeleeEnemy() }
-                        : new List<EnemyCombatant> { DefaultContent.CreateMeleeEnemy(), DefaultContent.CreateRangedEnemy() };
+                    // 4 basic enemies to draw from now (was a hardcoded Sparkmite+Glowmoth
+                    // pair every time) - a real pool, so repeat Combat nodes don't always
+                    // mean the exact same fight.
+                    var basicPool = new List<System.Func<EnemyCombatant>>
+                        { DefaultContent.CreateMeleeEnemy, DefaultContent.CreateRangedEnemy, DefaultContent.CreateMudshell, DefaultContent.CreateWispStinger };
+                    int enemyCount = _rng.Next(2) == 0 ? 1 : 2;
+                    var basicEnemies = Enumerable.Range(0, enemyCount).Select(_ => basicPool[_rng.Next(basicPool.Count)]()).ToList();
                     StartCombatForNode(RewardNodeType.Combat, basicEnemies);
                     break;
                 case MapNodeType.Elite:
@@ -612,7 +665,7 @@ namespace Talune.UI
                 case MapNodeType.MysteryEvent:
                 case MapNodeType.FractureEvent:
                 case MapNodeType.BrambleEvent:
-                    ShowPlaceholderEvent(node.NodeType);
+                    ShowNarrativeEvent(node.NodeType);
                     break;
             }
         }
@@ -620,7 +673,12 @@ namespace Talune.UI
         private void AfterNodeResolved()
         {
             _map.MarkCurrentNodeCompleted();
-            if (_map.ActComplete) ShowRunEnd(true);
+            _nodesCompletedThisRun++;
+            if (_map.ActComplete)
+            {
+                if (_actIndex < ActCount - 1) AdvanceToNextAct();
+                else ShowRunEnd(true);
+            }
             else ShowMapScreen();
         }
 
@@ -679,11 +737,72 @@ namespace Talune.UI
             StartCombatForNode(RewardNodeType.Boss, new List<EnemyCombatant> { boss });
         }
 
+        /// <summary>One-time, dismiss-to-continue onboarding shown before the player's
+        /// very first combat ever (see StartCombatForNode) - the previous "onboarding"
+        /// was just the static HOW TO PLAY bar, which a brand new player has no reason
+        /// to read before their first click.</summary>
+        private void ShowTutorialOverlay(UnityAction onDone)
+        {
+            var overlayRT = CreateUIObject("TutorialOverlay", _screenContainer.transform);
+            StretchFull(overlayRT);
+            var bg = overlayRT.gameObject.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.9f);
+
+            var panelRT = CreateUIObject("Panel", overlayRT);
+            panelRT.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRT.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRT.sizeDelta = new Vector2(760, 440);
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 16;
+            panelLayout.padding = new RectOffset(30, 30, 30, 30);
+            panelLayout.childAlignment = TextAnchor.UpperCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = PanelBg;
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            var title = CreateText(panelRT, "WELCOME TO TALUNE", 22, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f), pixelFont: true);
+            AddLayoutElement(title.rectTransform, preferredHeight: 36);
+
+            var body = CreateText(panelRT,
+                "Click a card to play it, or press 1-9.\n\n" +
+                "If a card needs a target, click the enemy you want to hit.\n\n" +
+                "Press SPACE, ENTER, or click END TURN when you're done for the turn.\n\n" +
+                "On the map, click a glowing node to travel there - hover any node first to see what it is.\n\n" +
+                "Press Escape any time to pause, adjust volume, or abandon the run.",
+                16, TextAnchor.UpperLeft, new Color(0.9f, 0.9f, 0.9f));
+            AddLayoutElement(body.rectTransform, flexibleHeight: 1);
+
+            var gotItBtn = CreateButton(panelRT, "GOT IT", () =>
+            {
+                Destroy(overlayRT.gameObject);
+                onDone();
+            }, new Color(0.2f, 0.3f, 0.2f));
+            AddLayoutElement(gotItBtn.GetComponent<RectTransform>(), preferredHeight: 44);
+        }
+
         // ============================================================
         // Combat screen (mostly the same engine wiring as before)
         // ============================================================
 
+        /// <summary>Gate in front of the real combat-start logic: the very first time
+        /// this is ever called (tracked via PlayerPrefs, across runs), shows a one-time
+        /// tutorial overlay first instead of dropping a brand new player straight into a
+        /// fight with only the static "HOW TO PLAY" bar to go on.</summary>
         private void StartCombatForNode(RewardNodeType rewardType, List<EnemyCombatant> enemies)
+        {
+            if (PlayerPrefs.GetInt(TutorialSeenKey, 0) == 0)
+            {
+                PlayerPrefs.SetInt(TutorialSeenKey, 1);
+                PlayerPrefs.Save();
+                ShowTutorialOverlay(() => StartCombatForNodeInner(rewardType, enemies));
+                return;
+            }
+            StartCombatForNodeInner(rewardType, enemies);
+        }
+
+        private void StartCombatForNodeInner(RewardNodeType rewardType, List<EnemyCombatant> enemies)
         {
             _pendingRewardType = rewardType;
             _player.ClearCombatScopedStatuses(); // HP/relics persist; Growth/Thorns/Burn don't carry between fights.
@@ -1164,14 +1283,21 @@ namespace Talune.UI
                     : (null, null));
         }
 
+        /// <summary>A real picker: the player chooses which Kin to strengthen (shown with
+        /// their current Rank), rather than the shrine silently auto-picking whichever Kin
+        /// they'd already invested in most.</summary>
         private void ShowKinShrineReward()
         {
-            // No Kin-selection UI yet - defaults to whichever prototype Kin the player has
-            // invested in most, so the shrine reinforces the build already underway.
             var kins = new[] { KinType.Bubblo, KinType.Voltrix, KinType.Mossmaw };
-            var chosenKin = kins.OrderByDescending(k => _runState.CountOfKin(k)).First();
-            var reward = CombatReward.GenerateKinShrineReward(chosenKin, _cardPool, _rng);
-            ShowRewardScreen($"The shrine resonates with {chosenKin}.", reward.CardChoices, null, AfterNodeResolved);
+            ShowChoiceScreen("A Kin Shrine", "Choose which Kin to strengthen:",
+                kins.Select(k => (
+                    $"{k}\n(Rank {_runState.KinRank(k)})",
+                    (UnityAction)(() =>
+                    {
+                        var reward = CombatReward.GenerateKinShrineReward(k, _cardPool, _rng);
+                        ShowRewardScreen($"The shrine resonates with {k}.", reward.CardChoices, null, AfterNodeResolved);
+                    })
+                )).ToArray());
         }
 
         /// <summary>Generic "up to 3 cards + Skip" reward screen used by Combat/Elite/Boss/KinShrine rewards.</summary>
@@ -1197,8 +1323,10 @@ namespace Talune.UI
             skipBtn.onClick.AddListener(() => onDone());
         }
 
-        /// <summary>Up to 2 mutually-exclusive choices (used by Treasure) - plain text buttons, not cards.</summary>
-        private void ShowChoiceScreen(string title, string message, (string label, UnityAction onClick) optionA, (string label, UnityAction onClick) optionB)
+        /// <summary>Mutually-exclusive choices (Treasure's 2, Kin Shrine's 3, an event's
+        /// 2) - plain text buttons, not cards. A null label is skipped, so a call site can
+        /// still pass a fixed-size option list where one slot is conditionally absent.</summary>
+        private void ShowChoiceScreen(string title, string message, params (string label, UnityAction onClick)[] options)
         {
             ShowScreen("Choice");
             RefreshHUD();
@@ -1209,7 +1337,7 @@ namespace Talune.UI
             var container = screen.transform.Find("Options");
             for (int i = container.childCount - 1; i >= 0; i--) DestroyImmediate(container.GetChild(i).gameObject);
 
-            foreach (var option in new[] { optionA, optionB })
+            foreach (var option in options)
             {
                 if (option.label == null) continue;
                 var btn = CreateButton(container, option.label, option.onClick, new Color(0.2f, 0.2f, 0.27f), fontSize: 15);
@@ -1295,21 +1423,72 @@ namespace Talune.UI
         }
 
         // ============================================================
-        // Placeholder narrative events (no content authored yet)
+        // Narrative events - each a short scene with a real risk/reward choice,
+        // resolving through a confirmation message before returning to the map.
         // ============================================================
 
-        private void ShowPlaceholderEvent(MapNodeType type)
+        private void ShowNarrativeEvent(MapNodeType type)
         {
-            string title = type switch
+            switch (type)
             {
-                MapNodeType.MysteryEvent => "A Mystery",
-                MapNodeType.FractureEvent => "The Fracture Stirs",
-                MapNodeType.BrambleEvent => "Bramble Appears",
-                _ => "Something Happens",
-            };
-            int consolation = _rng.Next(5, 16);
-            _runState.AddFragments(consolation);
-            ShowMessage(title, "Talune holds its secrets a while longer.\n\n(No content authored for this event yet.)", consolation, AfterNodeResolved);
+                case MapNodeType.MysteryEvent:
+                    ShowChoiceScreen("A Flickering Light", "A pale light drifts between the trees, always just out of reach.",
+                        ("Follow it", (UnityAction)(() =>
+                        {
+                            if (_rng.Next(100) < 60)
+                            {
+                                var relic = _relicPool.OrderBy(_ => _rng.Next()).FirstOrDefault();
+                                if (relic != null) _runState.AddRelic(relic);
+                                ShowMessage("A Flickering Light", relic != null
+                                    ? $"The light leads you to a hidden cache.\n\nYou found the relic '{relic.RelicName}'!"
+                                    : "The light leads you to a hidden cache, already empty.", 0, AfterNodeResolved);
+                            }
+                            else
+                            {
+                                _player.TakeDamage(8);
+                                ShowMessage("A Flickering Light", "The light leads you into a snarled thicket. Something sharp finds you in the dark.\n\n-8 HP", 0, AfterNodeResolved);
+                            }
+                        })),
+                        ("Leave it be", (UnityAction)(() =>
+                        {
+                            _runState.AddFragments(12);
+                            ShowMessage("A Flickering Light", "You keep walking. Whatever it was, it isn't your concern tonight.", 12, AfterNodeResolved);
+                        })));
+                    break;
+
+                case MapNodeType.FractureEvent:
+                    ShowChoiceScreen("The Fracture Stirs", "A crack in the world hums with raw, unstable energy.",
+                        ("Reach into the Fracture", (UnityAction)(() =>
+                        {
+                            _runState.AddFragments(20);
+                            _player.TakeDamage(6);
+                            ShowMessage("The Fracture Stirs", "Power floods through you - the strain burns on the way in.\n\n-6 HP", 20, AfterNodeResolved);
+                        })),
+                        ("Seal it shut", (UnityAction)(() =>
+                        {
+                            _runState.AddFragments(8);
+                            ShowMessage("The Fracture Stirs", "You force the crack closed before it can widen. Safer, if less rewarding.", 8, AfterNodeResolved);
+                        })));
+                    break;
+
+                case MapNodeType.BrambleEvent:
+                    ShowChoiceScreen("A Tangle of Brambles", "Thorned vines block the path ahead, thick enough to hide something within.",
+                        ("Push through", (UnityAction)(() =>
+                        {
+                            _player.TakeDamage(5);
+                            var card = _cardPool.Count > 0 ? _cardPool[_rng.Next(_cardPool.Count)] : null;
+                            if (card != null) _runState.AddCardToDeck(card);
+                            ShowMessage("A Tangle of Brambles", card != null
+                                ? $"Thorns rake at you as you force your way through - but you emerge holding '{card.CardName}'.\n\n-5 HP"
+                                : "Thorns rake at you as you force your way through, empty-handed.\n\n-5 HP", 0, AfterNodeResolved);
+                        })),
+                        ("Go around", (UnityAction)(() =>
+                        {
+                            _runState.AddFragments(10);
+                            ShowMessage("A Tangle of Brambles", "The long way round costs you time, but nothing else.", 10, AfterNodeResolved);
+                        })));
+                    break;
+            }
         }
 
         private void ShowMessage(string title, string body, int fragmentsGranted, UnityAction onContinue)
@@ -1332,9 +1511,24 @@ namespace Talune.UI
         {
             ShowScreen("RunEnd");
             var screen = _screens["RunEnd"];
-            screen.transform.Find("Title").GetComponent<Text>().text = success ? "ACT COMPLETE!" : "RUN FAILED";
+            screen.transform.Find("Title").GetComponent<Text>().text = success ? "RUN COMPLETE!" : "RUN FAILED";
+
+            // Meta-progression: Essence carries between runs regardless of outcome - a
+            // failed run still banks credit for how far it got. Guarded so re-entering
+            // this screen (there's no path back to it currently, but belt-and-suspenders)
+            // never double-awards.
+            string unlockLine = "";
+            if (!_essenceAwardedThisRun)
+            {
+                _essenceAwardedThisRun = true;
+                int essenceEarned = _nodesCompletedThisRun * 2 + (success ? 30 : 0);
+                var newlyUnlocked = MetaProgress.AddEssence(essenceEarned);
+                unlockLine = $"\n\n+{essenceEarned} Essence (Total: {MetaProgress.Essence})";
+                if (newlyUnlocked.Count > 0) unlockLine += $"\n\nUNLOCKED: {string.Join(", ", newlyUnlocked)}!";
+            }
+
             screen.transform.Find("Summary").GetComponent<Text>().text =
-                $"Deck: {_runState.Deck.Count} cards\nRelics: {_runState.Relics.Count}\nFragments: {_runState.Fragments}";
+                $"Deck: {_runState.Deck.Count} cards\nRelics: {_runState.Relics.Count}\nFragments: {_runState.Fragments}" + unlockLine;
         }
 
         // ============================================================
@@ -1349,8 +1543,15 @@ namespace Talune.UI
             if (name != "Map" && _backgroundRT != null) _backgroundRT.anchoredPosition = Vector2.zero;
             // The map gets its own calmer, simpler background - the busier combat one is
             // meant to sit behind panels full of enemies/cards, not behind an open board.
+            // Act 2/3 each get one dedicated atmospheric background for every screen,
+            // so a run doesn't stay visually "the same forest" the whole way through.
             if (_backgroundImg != null)
-                _backgroundImg.sprite = name == "Map" && _mapBackgroundSprite != null ? _mapBackgroundSprite : _combatBackgroundSprite;
+            {
+                Sprite actOverride = _actIndex switch { 1 => _act2BackgroundSprite, 2 => _act3BackgroundSprite, _ => null };
+                _backgroundImg.sprite = actOverride != null ? actOverride
+                    : name == "Map" && _mapBackgroundSprite != null ? _mapBackgroundSprite
+                    : _combatBackgroundSprite;
+            }
             // Purely decorative flash-to-black - fire-and-forget, doesn't gate or delay
             // the SetActive/content-rebuild above, which both already happen synchronously.
             if (_transitionOverlayImg != null) StopAndStartTween(_transitionOverlayImg.rectTransform, FlashTransition(_transitionOverlayImg));
@@ -1447,7 +1648,7 @@ namespace Talune.UI
             relicRowRT.anchorMax = new Vector2(1f, 1f);
             relicRowRT.pivot = new Vector2(1f, 0.5f);
             relicRowRT.sizeDelta = new Vector2(340, 0);
-            relicRowRT.anchoredPosition = new Vector2(-10, 0);
+            relicRowRT.anchoredPosition = new Vector2(-46, 0); // Leaves room for the pause button beyond it.
             var relicLayout = relicRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
             relicLayout.spacing = 4;
             relicLayout.childAlignment = TextAnchor.MiddleRight;
@@ -1455,6 +1656,20 @@ namespace Talune.UI
             relicLayout.childForceExpandHeight = true;
             relicLayout.padding = new RectOffset(0, 0, 4, 4);
             _relicRow = relicRowRT;
+
+            var pauseBtnRT = CreateUIObject("PauseButton", hudRT);
+            pauseBtnRT.anchorMin = new Vector2(1f, 0.5f);
+            pauseBtnRT.anchorMax = new Vector2(1f, 0.5f);
+            pauseBtnRT.pivot = new Vector2(1f, 0.5f);
+            pauseBtnRT.sizeDelta = new Vector2(28, 28);
+            pauseBtnRT.anchoredPosition = new Vector2(-8, 0);
+            var pauseBtnImg = pauseBtnRT.gameObject.AddComponent<Image>();
+            pauseBtnImg.color = new Color(0.3f, 0.28f, 0.2f);
+            var pauseBtn = pauseBtnRT.gameObject.AddComponent<Button>();
+            pauseBtn.targetGraphic = pauseBtnImg;
+            pauseBtn.onClick.AddListener(TogglePauseMenu);
+            var pauseBtnText = CreateText(pauseBtnRT, "||", 14, TextAnchor.MiddleCenter, new Color(0.9f, 0.85f, 0.6f));
+            StretchFull(pauseBtnText.rectTransform);
 
             // Screen container - exactly one child active at a time.
             var containerRT = CreateUIObject("ScreenContainer", root);
@@ -1469,6 +1684,18 @@ namespace Talune.UI
             BuildMessageScreen(containerRT);
             BuildRunEndScreen(containerRT);
 
+            // Relic tooltip - floats just under the HUD, filled in on hover (see RefreshHUD).
+            _relicTooltipText = CreateText(canvasGO.transform, "", 15, TextAnchor.MiddleRight, new Color(0.9f, 0.85f, 0.6f));
+            _relicTooltipText.rectTransform.anchorMin = new Vector2(1f, 1f);
+            _relicTooltipText.rectTransform.anchorMax = new Vector2(1f, 1f);
+            _relicTooltipText.rectTransform.pivot = new Vector2(1f, 1f);
+            _relicTooltipText.rectTransform.sizeDelta = new Vector2(440, 24);
+            _relicTooltipText.rectTransform.anchoredPosition = new Vector2(-16, -50);
+            _relicTooltipText.raycastTarget = false;
+            AddDropShadow(_relicTooltipText, new Vector2(2, -2), 0.7f);
+
+            BuildPauseOverlay(canvasGO.transform);
+
             // A purely decorative flash-to-black on every screen change (see ShowScreen) -
             // sits above every screen (last sibling under the canvas), never blocks clicks.
             var transitionRT = CreateUIObject("TransitionOverlay", canvasGO.transform);
@@ -1476,6 +1703,122 @@ namespace Talune.UI
             _transitionOverlayImg = transitionRT.gameObject.AddComponent<Image>();
             _transitionOverlayImg.color = new Color(0f, 0f, 0f, 0f);
             _transitionOverlayImg.raycastTarget = false;
+        }
+
+        // ============================================================
+        // Pause menu (Escape, or the HUD's pause button) - an overlay on top of
+        // whatever screen is active, not a screen swap, so resuming just hides it.
+        // ============================================================
+
+        private void BuildPauseOverlay(Transform canvasTransform)
+        {
+            _pauseOverlay = CreateUIObject("PauseOverlay", canvasTransform).gameObject;
+            StretchFull(_pauseOverlay.GetComponent<RectTransform>());
+            var bg = _pauseOverlay.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.82f);
+
+            var panelRT = CreateUIObject("Panel", _pauseOverlay.transform);
+            panelRT.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRT.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRT.sizeDelta = new Vector2(480, 360);
+            panelRT.anchoredPosition = Vector2.zero;
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 14;
+            panelLayout.padding = new RectOffset(24, 24, 24, 24);
+            panelLayout.childAlignment = TextAnchor.UpperCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = PanelBg;
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            var title = CreateText(panelRT, "PAUSED", 26, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f), pixelFont: true);
+            AddLayoutElement(title.rectTransform, preferredHeight: 40);
+
+            CreateVolumeRow(panelRT, "Music", () => _musicSource);
+            CreateVolumeRow(panelRT, "SFX", () => _sfxSource);
+
+            var mainRowRT = CreateUIObject("MainRow", panelRT);
+            AddLayoutElement(mainRowRT, preferredHeight: 44);
+            var mainRowLayout = mainRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            mainRowLayout.spacing = 12;
+            mainRowLayout.childForceExpandWidth = true;
+            var mainRowGO = mainRowRT.gameObject;
+            CreateButton(mainRowRT, "RESUME", ClosePauseMenu, new Color(0.2f, 0.3f, 0.2f));
+            CreateButton(mainRowRT, "ABANDON RUN", () =>
+            {
+                mainRowGO.SetActive(false);
+                _pauseConfirmRow.SetActive(true);
+            }, new Color(0.35f, 0.18f, 0.18f));
+
+            var confirmRowRT = CreateUIObject("ConfirmRow", panelRT);
+            AddLayoutElement(confirmRowRT, preferredHeight: 44);
+            var confirmLayout = confirmRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            confirmLayout.spacing = 12;
+            confirmLayout.childForceExpandWidth = true;
+            _pauseConfirmRow = confirmRowRT.gameObject;
+            CreateButton(confirmRowRT, "YES, ABANDON", () =>
+            {
+                ClosePauseMenu();
+                StartNewRun(); // Discards the current run entirely - the confirm step above is the safeguard.
+            }, new Color(0.45f, 0.15f, 0.15f));
+            CreateButton(confirmRowRT, "CANCEL", () =>
+            {
+                _pauseConfirmRow.SetActive(false);
+                mainRowGO.SetActive(true);
+            }, new Color(0.2f, 0.2f, 0.2f));
+            _pauseConfirmRow.SetActive(false);
+
+            _pauseOverlay.SetActive(false);
+        }
+
+        /// <summary>A "Music -  70%  +" row with stepped +-10% buttons instead of a real
+        /// Slider component - this codebase has no Slider anywhere yet, and a button pair
+        /// reuses CreateButton/CreateText exactly like everything else in this file.</summary>
+        private Text CreateVolumeRow(Transform parent, string label, System.Func<AudioSource> source)
+        {
+            var rowRT = CreateUIObject($"{label}Row", parent);
+            AddLayoutElement(rowRT, preferredHeight: 34);
+            var rowLayout = rowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            rowLayout.spacing = 8;
+            rowLayout.childAlignment = TextAnchor.MiddleCenter;
+            rowLayout.childForceExpandWidth = false;
+
+            var labelText = CreateText(rowRT, label, 15, TextAnchor.MiddleLeft);
+            AddLayoutElement(labelText.rectTransform, preferredWidth: 90, preferredHeight: 30);
+
+            var minusBtn = CreateButton(rowRT, "-", null, new Color(0.22f, 0.22f, 0.22f), fontSize: 16);
+            AddLayoutElement(minusBtn.GetComponent<RectTransform>(), preferredWidth: 36, preferredHeight: 30);
+
+            var pctText = CreateText(rowRT, "", 15, TextAnchor.MiddleCenter);
+            AddLayoutElement(pctText.rectTransform, preferredWidth: 70, preferredHeight: 30);
+
+            var plusBtn = CreateButton(rowRT, "+", null, new Color(0.22f, 0.22f, 0.22f), fontSize: 16);
+            AddLayoutElement(plusBtn.GetComponent<RectTransform>(), preferredWidth: 36, preferredHeight: 30);
+
+            void Refresh() => pctText.text = $"{Mathf.RoundToInt(source().volume * 100f)}%";
+            minusBtn.onClick.AddListener(() => { var s = source(); s.volume = Mathf.Clamp01(s.volume - 0.1f); Refresh(); });
+            plusBtn.onClick.AddListener(() => { var s = source(); s.volume = Mathf.Clamp01(s.volume + 0.1f); Refresh(); });
+            Refresh();
+            return pctText;
+        }
+
+        private void TogglePauseMenu()
+        {
+            if (_pauseOverlay == null) return;
+            _pauseMenuOpen = !_pauseMenuOpen;
+            _pauseOverlay.SetActive(_pauseMenuOpen);
+            if (_pauseMenuOpen)
+            {
+                _pauseConfirmRow.SetActive(false);
+                _pauseOverlay.transform.Find("Panel/MainRow").gameObject.SetActive(true);
+            }
+        }
+
+        private void ClosePauseMenu()
+        {
+            _pauseMenuOpen = false;
+            if (_pauseOverlay != null) _pauseOverlay.SetActive(false);
         }
 
         private void BuildMapScreen(Transform parent)

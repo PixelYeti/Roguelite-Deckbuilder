@@ -188,6 +188,52 @@ namespace Talune.Content
             "Heal 8. Gain 3 Growth.",
             CardEffect.Heal(8), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 3));
 
+        // --- Second wave of filler, rounding the reward pool out toward the ~30-card
+        // prototype target (was 20). Every effect reuses an existing CardEffectKind -
+        // no new engine mechanics needed for a bigger pool. ---
+
+        public static CardData HealingTide() => WithUpgrade(MakeCard("Healing Tide",
+            "Heal 10. Gain 1 Energy.", CardType.Skill, KinType.Bubblo, 2,
+            CardEffect.Heal(10), CardEffect.GainEnergy(1)),
+            "Heal 14. Gain 1 Energy.", CardEffect.Heal(14), CardEffect.GainEnergy(1));
+
+        public static CardData RiptideStrike() => WithUpgrade(MakeCard("Riptide Strike",
+            "Deal 8 damage. Gain 4 Block.", CardType.Attack, KinType.Bubblo, 2,
+            CardEffect.Damage(TargetType.SingleEnemy, 8), CardEffect.Block(4)),
+            "Deal 11 damage. Gain 6 Block.", CardEffect.Damage(TargetType.SingleEnemy, 11), CardEffect.Block(6));
+
+        public static CardData StaticSurge() => WithUpgrade(MakeCard("Static Surge",
+            "Gain 2 Energy.", CardType.Skill, KinType.Voltrix, 0,
+            CardEffect.GainEnergy(2)),
+            "Gain 3 Energy.", CardEffect.GainEnergy(3));
+
+        public static CardData LightningLance() => WithUpgrade(MakeCard("Lightning Lance",
+            "Deal 10 damage. Deal 4 damage to a second enemy.", CardType.Attack, KinType.Voltrix, 2,
+            CardEffect.Damage(TargetType.SingleEnemy, 10), CardEffect.Damage(TargetType.SecondEnemy, 4)),
+            "Deal 14 damage. Deal 6 damage to a second enemy.",
+            CardEffect.Damage(TargetType.SingleEnemy, 14), CardEffect.Damage(TargetType.SecondEnemy, 6));
+
+        public static CardData DeepRoots() => WithUpgrade(MakeCard("Deep Roots",
+            "Gain 4 Growth. Gain 4 Thorns.", CardType.Power, KinType.Mossmaw, 2,
+            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 4), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 4)),
+            "Gain 6 Growth. Gain 6 Thorns.",
+            CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 6), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Thorns, 6));
+
+        public static CardData VineWhip() => WithUpgrade(MakeCard("Vine Whip",
+            "Deal 7 damage. Gain 1 Growth.", CardType.Attack, KinType.Mossmaw, 1,
+            CardEffect.Damage(TargetType.SingleEnemy, 7), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 1)),
+            "Deal 10 damage. Gain 1 Growth.", CardEffect.Damage(TargetType.SingleEnemy, 10), CardEffect.ApplyStatus(TargetType.Self, StatusEffectType.Growth, 1));
+
+        public static CardData Adrenaline() => WithUpgrade(MakeCard("Adrenaline",
+            "Gain 1 Energy. Deal 3 damage.", CardType.Skill, KinType.None, 1,
+            CardEffect.GainEnergy(1), CardEffect.Damage(TargetType.SingleEnemy, 3)),
+            "Gain 1 Energy. Deal 5 damage.", CardEffect.GainEnergy(1), CardEffect.Damage(TargetType.SingleEnemy, 5));
+
+        public static CardData IronWill() => WithUpgrade(MakeCard("Iron Will",
+            "Gain 7 Block. Heal 2.", CardType.Guard, KinType.None, 1,
+            CardEffect.Block(7), CardEffect.Heal(2)),
+            "Gain 10 Block. Heal 3.", CardEffect.Block(10), CardEffect.Heal(3));
+
         public static List<CardData> BuildRewardPool() => new()
         {
             StaticFang(), BubbleGuard(), RootStrike(),
@@ -196,7 +242,16 @@ namespace Talune.Content
             WithRarity(ChainSpark(), CardRarity.Uncommon), Overcharge(), WithRarity(Thunderbolt(), CardRarity.Uncommon),
             BrambleSlam(), WithRarity(Overgrowth(), CardRarity.Uncommon), ThornGuard(), WithRarity(Seedburst(), CardRarity.Uncommon),
             SecondWind(), Focus(), TwinStrike(), WithRarity(Bulwark(), CardRarity.Uncommon),
+            WithRarity(HealingTide(), CardRarity.Uncommon), WithRarity(RiptideStrike(), CardRarity.Uncommon), StaticSurge(),
+            WithRarity(LightningLance(), CardRarity.Uncommon), WithRarity(DeepRoots(), CardRarity.Uncommon), VineWhip(),
+            Adrenaline(), IronWill(),
         };
+
+        /// <summary>Meta-progression unlock (see MetaProgress) - a strong vanilla finisher,
+        /// added to the reward pool once the player has earned enough Essence across runs.</summary>
+        public static CardData EssenceBurst() => MakeCard("Essence Burst",
+            "Deal 14 damage.", CardType.Attack, KinType.None, 2,
+            CardEffect.Damage(TargetType.SingleEnemy, 14));
 
         // --- Relics (Fix: "modify rules, not flat bonuses" - see RelicEffectKind) ---
 
@@ -211,6 +266,11 @@ namespace Talune.Content
             MakeRelic("Growing Pride", "Whenever you play a Mossmaw card, gain 1 Growth.", RelicEffectKind.MossmawCardGrantsGrowth, 1),
             MakeRelic("Fracture Shard", "Whenever an enemy dies, gain 1 Energy.", RelicEffectKind.EnemyDeathGrantsEnergy, 1),
         };
+
+        /// <summary>Meta-progression unlock (see MetaProgress) - added to the relic pool
+        /// once the player has earned enough Essence across runs.</summary>
+        public static RelicData CreateEssenceRelic() =>
+            MakeRelic("Veteran's Charm", "At the start of combat, gain 8 Block.", RelicEffectKind.StartCombatBlock, 8);
 
         private static RelicData MakeRelic(string relicName, string description, RelicEffectKind kind, int value)
         {
@@ -263,6 +323,23 @@ namespace Talune.Content
                 Rule(Move(IntentCategory.Attack, 7), weight: 2f),
                 Rule(Move(IntentCategory.Attack, 9), weight: 1f, maxConsecutive: 1), // Can't throw the big hit twice in a row.
                 Rule(Move(IntentCategory.Block, 6), weight: 1f)));
+
+        /// <summary>A defensive basic enemy - blocks more than it attacks, so the player
+        /// has to actually break through Block rather than just racing damage.</summary>
+        public static EnemyCombatant CreateMudshell() => new(
+            "Mudshell", BaselineNumbers.BasicEnemyStandardHP + 6,
+            MakeAIProfile(
+                Rule(Move(IntentCategory.Block, 10), weight: 2f),
+                Rule(Move(IntentCategory.Attack, 6), weight: 2f),
+                Rule(Move(IntentCategory.Attack, 10), weight: 1f, maxConsecutive: 1)));
+
+        /// <summary>A second ranged/debuff basic (alongside Glowmoth) so a Combat node
+        /// drawing two ranged enemies doesn't always mean the exact same fight twice.</summary>
+        public static EnemyCombatant CreateWispStinger() => new(
+            "Wisp Stinger", BaselineNumbers.BasicEnemyWeakHP + 2,
+            MakeAIProfile(
+                Rule(Move(IntentCategory.Debuff, 0, StatusEffectType.Burn, 3, "Wisp Sting"), weight: 2f),
+                Rule(Move(IntentCategory.Attack, 3), weight: 1f)));
 
         public static EnemyCombatant CreateRangedEnemy() => new(
             "Glowmoth", BaselineNumbers.BasicEnemyWeakHP,
