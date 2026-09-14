@@ -469,7 +469,7 @@ namespace Talune.UI
         private void RefreshHUD()
         {
             _hudText.text = $"Rook  HP {_player.CurrentHP}/{_player.MaxHP}    Fragments {_runState.Fragments}    Deck {_runState.Deck.Count}    Relics {_runState.Relics.Count}    Act {_actIndex + 1}/{ActCount}";
-            SetHealthBarFill(_hudHpFill, _player.CurrentHP, _player.MaxHP);
+            AnimateHealthBarFill(_hudHpFill, _player.CurrentHP, _player.MaxHP);
 
             if (_relicRow == null) return;
             for (int i = _relicRow.childCount - 1; i >= 0; i--) DestroyImmediate(_relicRow.GetChild(i).gameObject);
@@ -1405,7 +1405,7 @@ namespace Talune.UI
                     ? $"{enemy.DisplayName}\n(defeated)"
                     : (targetable ? "◆ CLICK TO TARGET ◆\n" : "") +
                       $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
-                if (ui.hpFill != null) SetHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP);
+                if (ui.hpFill != null) AnimateHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP);
                 RefreshStatusRow(ui.statusRow, enemy);
                 if (ui.intentIcon != null)
                 {
@@ -1464,7 +1464,7 @@ namespace Talune.UI
         {
             var p = _combat.Player;
             _playerStatsText.text = $"Rook   HP {p.CurrentHP}/{p.MaxHP}   Block {p.Block}   Energy {p.Energy}/{p.MaxEnergy}   Turn {_combat.TurnCount}";
-            SetHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP);
+            AnimateHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP);
             RefreshStatusRow(_playerStatusRow, p);
             RefreshEnemyPanels();
             RebuildHand();
@@ -1484,14 +1484,54 @@ namespace Talune.UI
             RefreshHUD();
         }
 
+        private static Color HealthBarColor(float pct) => Color.Lerp(new Color(0.75f, 0.15f, 0.15f), new Color(0.25f, 0.75f, 0.25f), pct);
+
         /// <summary>Green at full HP, sliding to red as it drops - color plus the fill
-        /// bar itself, so health reads at a glance instead of requiring reading numbers.</summary>
+        /// bar itself, so health reads at a glance instead of requiring reading numbers.
+        /// Instant - only for the bar's initial state at panel-build time. Any later change
+        /// goes through AnimateHealthBarFill instead (see its own comment for why).</summary>
         private static void SetHealthBarFill(Image fillImg, int current, int max)
         {
             if (fillImg == null) return;
             float pct = max > 0 ? Mathf.Clamp01((float)current / max) : 0f;
             fillImg.fillAmount = pct;
-            fillImg.color = Color.Lerp(new Color(0.75f, 0.15f, 0.15f), new Color(0.25f, 0.75f, 0.25f), pct);
+            fillImg.color = HealthBarColor(pct);
+        }
+
+        private readonly Dictionary<Image, Coroutine> _hpBarAnims = new();
+
+        /// <summary>Tweens fillAmount/color to the new HP fraction instead of snapping -
+        /// an instant cut landing in the same frame as a punch/flash/floating number (see
+        /// the damage-reaction code around OnEndTurnClicked and TryPlayCard) is easy to
+        /// read as "the bar didn't change" even though the value did, because nothing
+        /// draws the eye to the bar itself. Keyed by Image so a second hit before the
+        /// first tween finishes restarts cleanly from wherever the bar currently sits,
+        /// rather than fighting a stale coroutine.</summary>
+        private void AnimateHealthBarFill(Image fillImg, int current, int max)
+        {
+            if (fillImg == null) return;
+            if (_hpBarAnims.TryGetValue(fillImg, out var existing) && existing != null) StopCoroutine(existing);
+            _hpBarAnims[fillImg] = StartCoroutine(AnimateHealthBarFillRoutine(fillImg, current, max));
+        }
+
+        private static IEnumerator AnimateHealthBarFillRoutine(Image fillImg, int current, int max)
+        {
+            const float duration = 0.35f;
+            float from = fillImg.fillAmount;
+            float to = max > 0 ? Mathf.Clamp01((float)current / max) : 0f;
+            Color fromColor = fillImg.color;
+            Color toColor = HealthBarColor(to);
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (fillImg == null) yield break;
+                fillImg.fillAmount = Mathf.Lerp(from, to, p);
+                fillImg.color = Color.Lerp(fromColor, toColor, p);
+                yield return null;
+            }
+            if (fillImg != null) { fillImg.fillAmount = to; fillImg.color = toColor; }
         }
 
         private static string DescribeIntent(EnemyIntent intent) => intent.Category switch
