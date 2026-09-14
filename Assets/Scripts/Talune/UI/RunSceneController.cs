@@ -68,6 +68,8 @@ namespace Talune.UI
         private Text _hudText;
         private GameObject _screenContainer;
         private readonly Dictionary<string, GameObject> _screens = new();
+        private Camera _uiCamera;
+        private RectTransform _backgroundRT;
 
         // --- Combat screen refs ---
         private Text _playerStatsText;
@@ -347,6 +349,7 @@ namespace Talune.UI
             tokenImg.sprite = _playerTokenSprite;
             tokenImg.preserveAspect = true;
             tokenImg.raycastTarget = false;
+            AddDropShadow(tokenImg, new Vector2(3, -5), 0.6f);
             _playerTokenRT = tokenRT;
 
             // Auto-scroll so Rook's current position is centered in view.
@@ -423,9 +426,11 @@ namespace Talune.UI
             var img = rt.gameObject.AddComponent<Image>();
             img.sprite = GetRoundFillSprite(); // Round fill, so color doesn't peek past the round frame's corners.
             img.color = baseColor;
+            AddDropShadow(img, new Vector2(4, -4));
             var btn = rt.gameObject.AddComponent<Button>();
             btn.targetGraphic = img;
             btn.interactable = interactable;
+            if (interactable) AddTiltOnHover(rt); // Only the nodes you can actually pick invite a look.
 
             AddDecorativeFrame(rt, _mapNodeFrameSprite);
 
@@ -635,8 +640,13 @@ namespace Talune.UI
         }
 
         /// <summary>Quick punch-up-and-forward before the card actually resolves.</summary>
-        private static IEnumerator PlayCardCastAnimation(RectTransform visual)
+        private IEnumerator PlayCardCastAnimation(RectTransform visual)
         {
+            // The hover-tilt coroutine may still be live (a click doesn't fire
+            // PointerExit) - stop it and snap to identity so it can't fight the spin below.
+            if (_activeTiltTweens.TryGetValue(visual, out var tiltCo) && tiltCo != null) StopCoroutine(tiltCo);
+            visual.localRotation = Quaternion.identity;
+
             const float duration = 0.15f;
             Vector3 startScale = visual.localScale;
             Vector2 startPos = visual.anchoredPosition;
@@ -650,6 +660,7 @@ namespace Talune.UI
                 if (visual == null) yield break;
                 visual.localScale = Vector3.Lerp(startScale, peakScale, p);
                 visual.anchoredPosition = Vector2.Lerp(startPos, peakPos, p);
+                visual.localRotation = Quaternion.Euler(0f, Mathf.Lerp(0f, 360f, p), 0f); // A full spin as it's cast.
                 yield return null;
             }
         }
@@ -849,6 +860,7 @@ namespace Talune.UI
                 var panelRT = CreateUIObject(enemy.DisplayName, _enemyRow);
                 AddLayoutElement(panelRT, preferredWidth: 260, preferredHeight: 220);
                 var img = panelRT.gameObject.AddComponent<Image>();
+                AddDropShadow(img, new Vector2(5, -5));
                 var btn = panelRT.gameObject.AddComponent<Button>();
                 btn.targetGraphic = img;
                 var capturedEnemy = enemy;
@@ -1116,6 +1128,9 @@ namespace Talune.UI
         private void ShowScreen(string name)
         {
             foreach (var kvp in _screens) kvp.Value.SetActive(kvp.Key == name);
+            // The map's background parallax only makes sense while the map itself is
+            // visible - reset it so every other screen sees the biome centered.
+            if (name != "Map" && _backgroundRT != null) _backgroundRT.anchoredPosition = Vector2.zero;
         }
 
         // ============================================================
@@ -1144,15 +1159,20 @@ namespace Talune.UI
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1600, 900);
 
+            _uiCamera = cam; // null in overlay mode, which ScreenPointToLocalPointInRectangle treats as screen space - still correct.
+
             if (_combatBackgroundSprite != null)
             {
                 var bgRT = CreateUIObject("Background", canvasGO.transform);
                 StretchFull(bgRT);
+                bgRT.offsetMin -= new Vector2(50, 50); // Overscan so the map's parallax pan never reveals an edge.
+                bgRT.offsetMax += new Vector2(50, 50);
                 var bgImg = bgRT.gameObject.AddComponent<Image>();
                 bgImg.sprite = _combatBackgroundSprite;
                 bgImg.type = Image.Type.Simple;
                 bgImg.preserveAspect = false; // Cover the full canvas regardless of aspect ratio.
                 bgImg.raycastTarget = false;
+                _backgroundRT = bgRT;
             }
 
             var root = CreateUIObject("Root", canvasGO.transform);
@@ -1231,6 +1251,14 @@ namespace Talune.UI
             scrollRect.content = contentRT;
             _mapContent = contentRT;
             _mapScrollRect = scrollRect;
+
+            // Subtle parallax: the biome drifts a little against the scroll direction,
+            // so the board reads as sitting in front of the forest rather than pasted
+            // flat on top of it.
+            scrollRect.onValueChanged.AddListener(v =>
+            {
+                if (_backgroundRT != null) _backgroundRT.anchoredPosition = new Vector2(0f, (v.y - 0.5f) * 60f);
+            });
 
             RegisterScreen("Map", screen);
         }
@@ -1552,6 +1580,7 @@ namespace Talune.UI
             frameImg.color = affordable ? Color.white : CardUnaffordableTint;
             frameImg.type = Image.Type.Simple;
             frameImg.raycastTarget = false;
+            AddDropShadow(frameImg, new Vector2(6, -6));
 
             if (hotkeyNumber.HasValue)
             {
@@ -1637,9 +1666,11 @@ namespace Talune.UI
             const float duration = 0.18f;
             Vector3 fromScale = Vector3.one * 0.6f;
             Vector2 fromPos = new(0, -40);
+            Quaternion fromRot = Quaternion.Euler(0f, 75f, 0f); // Starts edge-on, like flipping face-up as it's dealt.
             if (visual == null) yield break;
             visual.localScale = fromScale;
             visual.anchoredPosition = fromPos;
+            visual.localRotation = fromRot;
 
             float t = 0f;
             while (t < duration)
@@ -1649,9 +1680,10 @@ namespace Talune.UI
                 if (visual == null) yield break;
                 visual.localScale = Vector3.Lerp(fromScale, Vector3.one, p);
                 visual.anchoredPosition = Vector2.Lerp(fromPos, Vector2.zero, p);
+                visual.localRotation = Quaternion.Slerp(fromRot, Quaternion.identity, p);
                 yield return null;
             }
-            if (visual != null) { visual.localScale = Vector3.one; visual.anchoredPosition = Vector2.zero; }
+            if (visual != null) { visual.localScale = Vector3.one; visual.anchoredPosition = Vector2.zero; visual.localRotation = Quaternion.identity; }
         }
 
         private void AddHoverRaise(RectTransform slot, RectTransform visual, Canvas sortingCanvas)
@@ -1664,11 +1696,16 @@ namespace Talune.UI
                 sortingCanvas.overrideSorting = true;
                 sortingCanvas.sortingOrder = 100;
                 StopAndStartTween(visual, TweenCard(visual, new Vector2(0, 24), new Vector3(1.12f, 1.12f, 1f)));
+                StopAndStartTilt(visual, TrackCardTilt(slot, visual));
             });
             trigger.triggers.Add(enter);
 
             var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
-            exit.callback.AddListener(_ => StopAndStartTween(visual, TweenCardThenReset(visual, sortingCanvas)));
+            exit.callback.AddListener(_ =>
+            {
+                StopAndStartTween(visual, TweenCardThenReset(visual, sortingCanvas));
+                StopAndStartTilt(visual, ResetTilt(visual));
+            });
             trigger.triggers.Add(exit);
         }
 
@@ -1684,6 +1721,79 @@ namespace Talune.UI
         {
             if (_activeTweens.TryGetValue(rt, out var existing) && existing != null) StopCoroutine(existing);
             _activeTweens[rt] = StartCoroutine(routine);
+        }
+
+        // --- "3D-feel" polish: cards/enemy panels/map nodes tilt toward the cursor on
+        // hover and cast a drop shadow, without touching any of the actual art assets -
+        // just RectTransform 3D rotation (UI elements genuinely live in 3D space, even
+        // on a flat canvas) plus the built-in Shadow component. Tracked in its own
+        // dictionary, separate from _activeTweens, since a card's position/scale tween
+        // and its tilt tween run concurrently and must not stop each other. ---
+        private readonly Dictionary<RectTransform, Coroutine> _activeTiltTweens = new();
+
+        private void StopAndStartTilt(RectTransform rt, IEnumerator routine)
+        {
+            if (_activeTiltTweens.TryGetValue(rt, out var existing) && existing != null) StopCoroutine(existing);
+            _activeTiltTweens[rt] = StartCoroutine(routine);
+        }
+
+        /// <summary>Rotates `visual` to face the cursor's offset from `hitArea`'s center,
+        /// for as long as this coroutine keeps running (the caller is responsible for
+        /// stopping it on PointerExit via StopAndStartTilt).</summary>
+        private IEnumerator TrackCardTilt(RectTransform hitArea, RectTransform visual)
+        {
+            const float maxTiltDegrees = 14f;
+            while (true)
+            {
+                if (visual == null || hitArea == null) yield break;
+                if (Mouse.current != null &&
+                    RectTransformUtility.ScreenPointToLocalPointInRectangle(hitArea, Mouse.current.position.ReadValue(), _uiCamera, out var local))
+                {
+                    var rect = hitArea.rect;
+                    float nx = Mathf.Clamp(local.x / (rect.width * 0.5f), -1f, 1f);
+                    float ny = Mathf.Clamp(local.y / (rect.height * 0.5f), -1f, 1f);
+                    var targetRot = Quaternion.Euler(-ny * maxTiltDegrees, nx * maxTiltDegrees, 0f);
+                    visual.localRotation = Quaternion.Slerp(visual.localRotation, targetRot, Time.unscaledDeltaTime * 14f);
+                }
+                yield return null;
+            }
+        }
+
+        private static IEnumerator ResetTilt(RectTransform visual)
+        {
+            const float duration = 0.15f;
+            if (visual == null) yield break;
+            Quaternion start = visual.localRotation;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                if (visual == null) yield break;
+                visual.localRotation = Quaternion.Slerp(start, Quaternion.identity, p);
+                yield return null;
+            }
+            if (visual != null) visual.localRotation = Quaternion.identity;
+        }
+
+        /// <summary>Wires tilt-on-hover alone (no lift/scale) - used for elements that
+        /// aren't cards, like map nodes.</summary>
+        private void AddTiltOnHover(RectTransform rt)
+        {
+            var trigger = rt.gameObject.GetComponent<EventTrigger>() ?? rt.gameObject.AddComponent<EventTrigger>();
+            var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+            enter.callback.AddListener(_ => StopAndStartTilt(rt, TrackCardTilt(rt, rt)));
+            trigger.triggers.Add(enter);
+            var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+            exit.callback.AddListener(_ => StopAndStartTilt(rt, ResetTilt(rt)));
+            trigger.triggers.Add(exit);
+        }
+
+        private static void AddDropShadow(Graphic target, Vector2 distance, float alpha = 0.5f)
+        {
+            var shadow = target.gameObject.AddComponent<Shadow>();
+            shadow.effectColor = new Color(0f, 0f, 0f, alpha);
+            shadow.effectDistance = distance;
         }
 
         private static IEnumerator TweenCard(RectTransform rt, Vector2 targetPos, Vector3 targetScale)
