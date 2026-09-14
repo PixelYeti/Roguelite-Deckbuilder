@@ -70,6 +70,8 @@ namespace Talune.UI
         private readonly Dictionary<string, GameObject> _screens = new();
         private Camera _uiCamera;
         private RectTransform _backgroundRT;
+        private Image _backgroundImg;
+        private Text _mapTooltipText;
         private Font _pixelFont;
         private AudioSource _musicSource;
         private Image _transitionOverlayImg;
@@ -147,6 +149,7 @@ namespace Talune.UI
 
         private Sprite _cardFrameSprite;
         private Sprite _combatBackgroundSprite;
+        private Sprite _mapBackgroundSprite;
         private Sprite _panelFrameSprite;
         private Sprite _buttonFrameSprite;
         private Sprite _mapNodeFrameSprite;
@@ -201,6 +204,7 @@ namespace Talune.UI
         {
             _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
             _combatBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/CombatBackground");
+            _mapBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/MapBackground");
             _panelFrameSprite = Resources.Load<Sprite>("Art/UI/PanelFrame");
             _buttonFrameSprite = Resources.Load<Sprite>("Art/UI/ButtonFrame");
             _mapNodeFrameSprite = Resources.Load<Sprite>("Art/UI/MapNodeFrame");
@@ -484,6 +488,7 @@ namespace Talune.UI
             btn.targetGraphic = img;
             btn.interactable = interactable;
             if (interactable) AddTiltOnHover(rt); // Only the nodes you can actually pick invite a look.
+            AddNodeHoverTooltip(rt, node, locked: alpha < 0.99f); // Every node, so the board can be read/planned ahead, not just clicked.
 
             AddDecorativeFrame(rt, _mapNodeFrameSprite);
 
@@ -501,6 +506,38 @@ namespace Talune.UI
                 iconImg.color = new Color(1f, 1f, 1f, alpha);
             }
             return btn;
+        }
+
+        private static string NodeFlavor(MapNodeType type) => type switch
+        {
+            MapNodeType.Combat => "A fight awaits",
+            MapNodeType.Elite => "Tougher - better reward",
+            MapNodeType.Boss => "The biome's guardian",
+            MapNodeType.KinShrine => "Choose a card of your Kin",
+            MapNodeType.KipShop => "Buy, upgrade, remove",
+            MapNodeType.Treasure => "Fragments or a relic",
+            MapNodeType.Healing => "Rest and recover",
+            MapNodeType.MysteryEvent => "Unknown...",
+            MapNodeType.FractureEvent => "The Fracture stirs",
+            MapNodeType.BrambleEvent => "Bramble appears",
+            _ => "",
+        };
+
+        /// <summary>Wired on every node regardless of interactable state - a locked node
+        /// still reveals what it is on hover, so the board can be read/planned ahead, not
+        /// just clicked. Directly answers "I can't tell what each node is on hover."</summary>
+        private void AddNodeHoverTooltip(RectTransform rt, MapNode node, bool locked)
+        {
+            var trigger = rt.gameObject.GetComponent<EventTrigger>() ?? rt.gameObject.AddComponent<EventTrigger>();
+            string label = $"{node.DisplayLabel} - {NodeFlavor(node.NodeType)}" + (locked ? "  (not reachable yet)" : "");
+
+            var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+            enter.callback.AddListener(_ => { if (_mapTooltipText != null) _mapTooltipText.text = label; });
+            trigger.triggers.Add(enter);
+
+            var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+            exit.callback.AddListener(_ => { if (_mapTooltipText != null) _mapTooltipText.text = "Hover a node to see what it is"; });
+            trigger.triggers.Add(exit);
         }
 
         private void OnMapNodeClicked(MapNode node)
@@ -1310,6 +1347,10 @@ namespace Talune.UI
             // The map's background parallax only makes sense while the map itself is
             // visible - reset it so every other screen sees the biome centered.
             if (name != "Map" && _backgroundRT != null) _backgroundRT.anchoredPosition = Vector2.zero;
+            // The map gets its own calmer, simpler background - the busier combat one is
+            // meant to sit behind panels full of enemies/cards, not behind an open board.
+            if (_backgroundImg != null)
+                _backgroundImg.sprite = name == "Map" && _mapBackgroundSprite != null ? _mapBackgroundSprite : _combatBackgroundSprite;
             // Purely decorative flash-to-black - fire-and-forget, doesn't gate or delay
             // the SetActive/content-rebuild above, which both already happen synchronously.
             if (_transitionOverlayImg != null) StopAndStartTween(_transitionOverlayImg.rectTransform, FlashTransition(_transitionOverlayImg));
@@ -1365,17 +1406,17 @@ namespace Talune.UI
 
             _uiCamera = cam; // null in overlay mode, which ScreenPointToLocalPointInRectangle treats as screen space - still correct.
 
-            if (_combatBackgroundSprite != null)
+            if (_combatBackgroundSprite != null || _mapBackgroundSprite != null)
             {
                 var bgRT = CreateUIObject("Background", canvasGO.transform);
                 StretchFull(bgRT);
                 bgRT.offsetMin -= new Vector2(50, 50); // Overscan so the map's parallax pan never reveals an edge.
                 bgRT.offsetMax += new Vector2(50, 50);
-                var bgImg = bgRT.gameObject.AddComponent<Image>();
-                bgImg.sprite = _combatBackgroundSprite;
-                bgImg.type = Image.Type.Simple;
-                bgImg.preserveAspect = false; // Cover the full canvas regardless of aspect ratio.
-                bgImg.raycastTarget = false;
+                _backgroundImg = bgRT.gameObject.AddComponent<Image>();
+                _backgroundImg.sprite = _combatBackgroundSprite;
+                _backgroundImg.type = Image.Type.Simple;
+                _backgroundImg.preserveAspect = false; // Cover the full canvas regardless of aspect ratio.
+                _backgroundImg.raycastTarget = false;
                 _backgroundRT = bgRT;
             }
 
@@ -1450,6 +1491,11 @@ namespace Talune.UI
             var title = CreateText(screen, "Choose your next step:", 20, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f));
             title.name = "Title";
             AddLayoutElement(title.rectTransform, preferredHeight: 32);
+
+            // Hover tooltip: node icons alone don't say what they are - this shows the
+            // real name + a one-line description for whichever node the cursor is over.
+            _mapTooltipText = CreateText(screen, "Hover a node to see what it is", 16, TextAnchor.MiddleCenter, new Color(0.85f, 0.82f, 0.65f));
+            AddLayoutElement(_mapTooltipText.rectTransform, preferredHeight: 22);
 
             // A real scrollable board, not just "the next row": Content holds every row
             // of the run's node graph (connectors + icons + Rook's token), rebuilt fresh
