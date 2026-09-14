@@ -47,8 +47,22 @@ namespace Talune.UI
         private RectTransform _pendingCardVisual;
         private bool _awaitingTarget;
 
-        // --- Map progression ---
-        private readonly List<MapNodeType> _visitedPath = new();
+        // --- Map progression: a real branching board (RunMap.Rows), not just "the next
+        // row" - every node is visible so the player can plan ahead, only the ones the
+        // current node actually connects to are clickable, and a token sprite tracks
+        // where Rook physically is on the path. ---
+        private ScrollRect _mapScrollRect;
+        private RectTransform _mapContent;
+        private RectTransform _playerTokenRT;
+        private readonly Dictionary<int, Vector2> _mapNodePositions = new(); // nodeId -> content-local position; -1 = pre-run start marker.
+        private readonly HashSet<(int from, int to)> _traveledEdges = new(); // Which specific edges were actually walked, for path-line highlighting.
+        private bool _mapTravelInProgress;
+
+        private const float MapRowSpacing = 150f;
+        private const float MapColumnSpacing = 230f;
+        private const float MapBottomStartY = 110f; // Row 0's Y within the scroll content.
+        private const float MapStartMarkerY = 20f;  // Pre-run token position, below row 0.
+        private const float MapTopPadding = 90f;    // Headroom above the boss row.
 
         // --- Shared chrome ---
         private Text _hudText;
@@ -103,8 +117,11 @@ namespace Talune.UI
         private Sprite _combatBackgroundSprite;
         private Sprite _panelFrameSprite;
         private Sprite _buttonFrameSprite;
+        private Sprite _mapNodeFrameSprite;
+        private Sprite _playerTokenSprite;
         private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
         private readonly Dictionary<CardType, Sprite> _cardIconCache = new();
+        private readonly Dictionary<MapNodeType, Sprite> _mapIconCache = new();
 
         private AudioSource _sfxSource;
         private readonly Dictionary<string, AudioClip> _sfxCache = new();
@@ -136,12 +153,26 @@ namespace Talune.UI
             return sprite;
         }
 
+        /// <summary>Combat reuses the card-type "Attack" icon (crossed swords) rather than
+        /// a separate generated asset - every other node type has its own Art/MapIcons sprite.</summary>
+        private Sprite GetMapIcon(MapNodeType type)
+        {
+            if (_mapIconCache.TryGetValue(type, out var cached)) return cached;
+            var sprite = type == MapNodeType.Combat
+                ? Resources.Load<Sprite>("Art/CardIcons/Attack")
+                : Resources.Load<Sprite>($"Art/MapIcons/{type}");
+            _mapIconCache[type] = sprite;
+            return sprite;
+        }
+
         private void Awake()
         {
             _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
             _combatBackgroundSprite = Resources.Load<Sprite>("Art/Backgrounds/CombatBackground");
             _panelFrameSprite = Resources.Load<Sprite>("Art/UI/PanelFrame");
             _buttonFrameSprite = Resources.Load<Sprite>("Art/UI/ButtonFrame");
+            _mapNodeFrameSprite = Resources.Load<Sprite>("Art/UI/MapNodeFrame");
+            _playerTokenSprite = Resources.Load<Sprite>("Art/MapIcons/PlayerToken");
             _sfxSource = gameObject.AddComponent<AudioSource>();
             _sfxSource.playOnAwake = false;
             BuildUI();
@@ -219,7 +250,7 @@ namespace Talune.UI
             _relicPool = DefaultContent.BuildStarterRelicPool();
             _player = new PlayerCombatant(BaselineNumbers.RookMaxHP, BaselineNumbers.PlayerMaxEnergy);
             _map = MapGenerator.Generate(rowCount: 13, nodesPerRow: 3, rng: _rng);
-            _visitedPath.Clear();
+            _traveledEdges.Clear();
 
             ShowMapScreen();
         }
@@ -233,85 +264,224 @@ namespace Talune.UI
         // Map screen
         // ============================================================
 
+        /// <summary>Renders the WHOLE board (every row of _map.Rows), not just the next
+        /// step - Fix 6's node-visibility rule means every node's type is already meant
+        /// to be visible before committing to a path, so showing the full graph (with
+        /// non-reachable nodes dimmed and non-interactive) is more honest to that intent
+        /// than only ever showing one row at a time.</summary>
         private void ShowMapScreen()
         {
             ShowScreen("Map");
             RefreshHUD();
-
-            // Path trail: a breadcrumb of every node type visited so far this Act, so
-            // arriving at the map actually reads as "how far in you are" rather than a
-            // context-free choice every time.
-            var trail = _screens["Map"].transform.Find("PathTrail");
-            for (int i = trail.childCount - 1; i >= 0; i--) DestroyImmediate(trail.GetChild(i).gameObject);
-            foreach (var visited in _visitedPath)
-            {
-                var dotRT = CreateUIObject("Dot", trail);
-                AddLayoutElement(dotRT, preferredWidth: 20, preferredHeight: 20);
-                var dotImg = dotRT.gameObject.AddComponent<Image>();
-                dotImg.color = NodeTypeColor.GetValueOrDefault(visited, Color.gray);
-            }
-            if (_visitedPath.Count > 0)
-            {
-                var arrowRT = CreateUIObject("Arrow", trail);
-                AddLayoutElement(arrowRT, preferredWidth: 20, preferredHeight: 20);
-                var arrowText = CreateText(arrowRT, "▶", 16, TextAnchor.MiddleCenter, new Color(0.8f, 0.8f, 0.8f));
-                StretchFull(arrowText.rectTransform);
-            }
-            var hereRT = CreateUIObject("Here", trail);
-            AddLayoutElement(hereRT, preferredWidth: 24, preferredHeight: 24);
-            var hereImg = hereRT.gameObject.AddComponent<Image>();
-            hereImg.color = new Color(0.95f, 0.85f, 0.3f); // Rook's current position.
-
-            var container = _screens["Map"].transform.Find("NodeButtons");
-            for (int i = container.childCount - 1; i >= 0; i--) DestroyImmediate(container.GetChild(i).gameObject);
+            _mapTravelInProgress = false;
 
             var titleText = _screens["Map"].transform.Find("Title").GetComponent<Text>();
             titleText.text = _map.CurrentNodeId == -1
                 ? "Choose your first step into Talune:"
                 : "Choose your next step:";
 
-            foreach (var node in _map.AvailableNextNodes())
+            for (int i = _mapContent.childCount - 1; i >= 0; i--) DestroyImmediate(_mapContent.GetChild(i).gameObject);
+            _mapNodePositions.Clear();
+
+            int rowCount = _map.Rows.Count;
+            float contentHeight = MapBottomStartY + (rowCount - 1) * MapRowSpacing + MapTopPadding;
+            _mapContent.sizeDelta = new Vector2(_mapContent.sizeDelta.x, contentHeight);
+
+            // Pass 1: every node's position, before drawing anything - connectors need
+            // both endpoints' positions up front. A small deterministic per-node jitter
+            // (seeded off the node's own Id, so it's stable across rebuilds) keeps the
+            // three lanes from looking like a rigid grid.
+            _mapNodePositions[-1] = new Vector2(0f, MapStartMarkerY);
+            foreach (var row in _map.Rows)
             {
-                Button btn = null;
-                btn = CreateButton(container, "", () => OnMapNodeClicked(node, btn.GetComponent<RectTransform>()),
-                    NodeTypeColor.GetValueOrDefault(node.NodeType, new Color(0.3f, 0.3f, 0.3f)), fontSize: 16);
-                AddLayoutElement(btn.GetComponent<RectTransform>(), preferredWidth: 220, preferredHeight: 100);
-                var label = btn.GetComponentInChildren<Text>();
-                label.text = $"{node.DisplayLabel}\n{NodeFlavor(node.NodeType)}";
+                for (int i = 0; i < row.Count; i++)
+                {
+                    var node = row[i];
+                    var rand = new System.Random(node.Id * 7919 + 13);
+                    float jitter = ((float)rand.NextDouble() - 0.5f) * 46f;
+                    float x = MapNodeX(i, row.Count) + jitter;
+                    float y = MapBottomStartY + node.RowIndex * MapRowSpacing;
+                    _mapNodePositions[node.Id] = new Vector2(x, y);
+                }
+            }
+
+            // Pass 2: connector lines, drawn before node icons so icons sit on top.
+            foreach (var row in _map.Rows)
+            {
+                foreach (var node in row)
+                {
+                    var from = _mapNodePositions[node.Id];
+                    foreach (var targetId in node.ConnectedNodeIds)
+                    {
+                        var to = _mapNodePositions[targetId];
+                        bool walked = _traveledEdges.Contains((node.Id, targetId));
+                        Color lineColor = walked ? new Color(0.85f, 0.72f, 0.35f, 0.9f) : new Color(0.4f, 0.36f, 0.3f, 0.55f);
+                        CreateMapConnector(_mapContent, from, to, lineColor, walked ? 7f : 5f);
+                    }
+                }
+            }
+
+            // Pass 3: node icons - available (clickable), completed/current (visited,
+            // full brightness), or locked (visible per Fix 6, but dim and unclickable).
+            var available = new HashSet<int>(_map.AvailableNextNodes().Select(n => n.Id));
+            foreach (var row in _map.Rows)
+            {
+                foreach (var node in row)
+                {
+                    bool isAvailable = available.Contains(node.Id);
+                    bool visited = node.Completed || node.Id == _map.CurrentNodeId;
+                    float alpha = isAvailable || visited ? 1f : 0.4f;
+                    var btn = CreateMapNodeButton(_mapContent, node, _mapNodePositions[node.Id], isAvailable, alpha);
+                    var capturedNode = node;
+                    btn.onClick.AddListener(() => OnMapNodeClicked(capturedNode));
+                }
+            }
+
+            // Rook's token: sits at the current node, or the pre-run start marker below row 0.
+            var tokenRT = CreateUIObject("PlayerToken", _mapContent);
+            tokenRT.anchorMin = tokenRT.anchorMax = new Vector2(0.5f, 0f);
+            tokenRT.pivot = new Vector2(0.5f, 0.5f);
+            tokenRT.sizeDelta = new Vector2(56, 56);
+            tokenRT.anchoredPosition = _mapNodePositions[_map.CurrentNodeId];
+            var tokenImg = tokenRT.gameObject.AddComponent<Image>();
+            tokenImg.sprite = _playerTokenSprite;
+            tokenImg.preserveAspect = true;
+            tokenImg.raycastTarget = false;
+            _playerTokenRT = tokenRT;
+
+            // Auto-scroll so Rook's current position is centered in view.
+            Canvas.ForceUpdateCanvases();
+            float viewportHeight = ((RectTransform)_mapScrollRect.viewport).rect.height;
+            if (contentHeight > viewportHeight)
+            {
+                float targetY = _mapNodePositions[_map.CurrentNodeId].y;
+                float maxScroll = contentHeight - viewportHeight;
+                _mapScrollRect.verticalNormalizedPosition = Mathf.Clamp01((targetY - viewportHeight / 2f) / maxScroll);
             }
         }
 
-        private static string NodeFlavor(MapNodeType type) => type switch
-        {
-            MapNodeType.Combat => "A fight awaits",
-            MapNodeType.Elite => "Tougher - better reward",
-            MapNodeType.Boss => "The biome's guardian",
-            MapNodeType.KinShrine => "Choose a card of your Kin",
-            MapNodeType.KipShop => "Buy, upgrade, remove",
-            MapNodeType.Treasure => "Fragments or a relic",
-            MapNodeType.Healing => "Rest and recover",
-            MapNodeType.MysteryEvent => "Unknown...",
-            MapNodeType.FractureEvent => "The Fracture stirs",
-            MapNodeType.BrambleEvent => "Bramble appears",
-            _ => "",
-        };
+        private Sprite _roundFillSprite;
 
-        private void OnMapNodeClicked(MapNode node, RectTransform buttonRT)
+        /// <summary>A plain white circle, generated once and cached - Unity's classic
+        /// "UI/Skin/Knob.psd" builtin resource (the usual shortcut for a round fill)
+        /// doesn't exist in this project's Unity version, so this stands in for it.</summary>
+        private Sprite GetRoundFillSprite()
         {
-            StartCoroutine(TravelThenResolve(node, buttonRT));
+            if (_roundFillSprite != null) return _roundFillSprite;
+            const int size = 64;
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            var center = new Vector2(size / 2f, size / 2f);
+            float radius = size / 2f - 1f;
+            var pixels = new Color[size * size];
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float dist = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), center);
+                    pixels[y * size + x] = new Color(1f, 1f, 1f, Mathf.Clamp01(radius - dist + 1f));
+                }
+            }
+            tex.SetPixels(pixels);
+            tex.Apply();
+            _roundFillSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+            return _roundFillSprite;
         }
 
-        /// <summary>Brief "stepping onto the node" punch before actually resolving it,
-        /// so choosing a path reads as travelling through Talune rather than an instant
-        /// menu-swap. The full node graph (not just the next row) is a bigger future
-        /// upgrade - this at least makes each step feel like a step.</summary>
-        private IEnumerator TravelThenResolve(MapNode node, RectTransform buttonRT)
+        private static float MapNodeX(int index, int count)
         {
-            PlaySfx("CardPlay"); // Reused as a travel "whoosh" - distinct SFX can follow later.
-            yield return PunchScale(buttonRT);
-            _visitedPath.Add(node.NodeType);
+            if (count <= 1) return 0f;
+            float span = MapColumnSpacing * (count - 1);
+            return -span / 2f + index * MapColumnSpacing;
+        }
+
+        private void CreateMapConnector(Transform parent, Vector2 a, Vector2 b, Color color, float thickness)
+        {
+            var rt = CreateUIObject("Connector", parent);
+            Vector2 delta = b - a;
+            float length = delta.magnitude;
+            float angle = Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg;
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0f);
+            rt.pivot = new Vector2(0f, 0.5f);
+            rt.sizeDelta = new Vector2(length, thickness);
+            rt.anchoredPosition = a;
+            rt.localEulerAngles = new Vector3(0f, 0f, angle);
+            var img = rt.gameObject.AddComponent<Image>();
+            img.color = color;
+            img.raycastTarget = false;
+        }
+
+        private Button CreateMapNodeButton(Transform parent, MapNode node, Vector2 pos, bool interactable, float alpha)
+        {
+            var rt = CreateUIObject($"Node_{node.Id}", parent);
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0f);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.sizeDelta = new Vector2(84, 84);
+            rt.anchoredPosition = pos;
+
+            var baseColor = NodeTypeColor.GetValueOrDefault(node.NodeType, new Color(0.3f, 0.3f, 0.3f));
+            baseColor.a = alpha;
+            var img = rt.gameObject.AddComponent<Image>();
+            img.sprite = GetRoundFillSprite(); // Round fill, so color doesn't peek past the round frame's corners.
+            img.color = baseColor;
+            var btn = rt.gameObject.AddComponent<Button>();
+            btn.targetGraphic = img;
+            btn.interactable = interactable;
+
+            AddDecorativeFrame(rt, _mapNodeFrameSprite);
+
+            var icon = GetMapIcon(node.NodeType);
+            if (icon != null)
+            {
+                var iconRT = CreateUIObject("Icon", rt);
+                iconRT.anchorMin = iconRT.anchorMax = new Vector2(0.5f, 0.5f);
+                iconRT.sizeDelta = new Vector2(52, 52);
+                iconRT.anchoredPosition = Vector2.zero;
+                var iconImg = iconRT.gameObject.AddComponent<Image>();
+                iconImg.sprite = icon;
+                iconImg.preserveAspect = true;
+                iconImg.raycastTarget = false;
+                iconImg.color = new Color(1f, 1f, 1f, alpha);
+            }
+            return btn;
+        }
+
+        private void OnMapNodeClicked(MapNode node)
+        {
+            if (_mapTravelInProgress) return;
+            _mapTravelInProgress = true;
+            StartCoroutine(TravelThenResolve(node));
+        }
+
+        /// <summary>Slides Rook's token from wherever it currently sits to the chosen
+        /// node before actually resolving it, so picking a path reads as walking the
+        /// board rather than an instant menu-swap. Has to finish before ResolveMapNode
+        /// navigates away, since ShowMapScreen fully rebuilds (destroying the token and
+        /// every position it was tracking) on its next call.</summary>
+        private IEnumerator TravelThenResolve(MapNode node)
+        {
+            PlaySfx("CardPlay"); // Reused as a travel "whoosh" - a distinct SFX can follow later.
+            if (_map.CurrentNodeId != -1) _traveledEdges.Add((_map.CurrentNodeId, node.Id));
+            if (_playerTokenRT != null && _mapNodePositions.TryGetValue(node.Id, out var targetPos))
+                yield return SlideToken(_playerTokenRT, targetPos);
             _map.TryMoveTo(node.Id);
             ResolveMapNode(node);
+        }
+
+        private static IEnumerator SlideToken(RectTransform rt, Vector2 targetPos)
+        {
+            const float duration = 0.45f;
+            Vector2 startPos = rt.anchoredPosition;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float p = Mathf.Clamp01(t / duration);
+                p = p * p * (3f - 2f * p); // Smoothstep - an eased step reads better than a linear slide.
+                if (rt == null) yield break;
+                rt.anchoredPosition = Vector2.Lerp(startPos, targetPos, p);
+                yield return null;
+            }
+            if (rt != null) rt.anchoredPosition = targetPos;
         }
 
         private void ResolveMapNode(MapNode node)
@@ -1024,31 +1194,43 @@ namespace Talune.UI
             var screen = CreateUIObject("MapScreen", parent);
             StretchFull(screen);
             var layout = screen.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.spacing = 20;
-            layout.padding = new RectOffset(20, 20, 30, 20);
-            layout.childAlignment = TextAnchor.UpperCenter;
+            layout.spacing = 10;
+            layout.padding = new RectOffset(20, 20, 16, 10);
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
 
-            var trailRT = CreateUIObject("PathTrail", screen);
-            AddLayoutElement(trailRT, preferredHeight: 26);
-            var trailLayout = trailRT.gameObject.AddComponent<HorizontalLayoutGroup>();
-            trailLayout.spacing = 6;
-            trailLayout.childAlignment = TextAnchor.MiddleCenter;
-            trailLayout.childForceExpandWidth = false;
-            trailLayout.childForceExpandHeight = false;
-
-            var title = CreateText(screen, "Choose your next step:", 22, TextAnchor.MiddleCenter);
+            var title = CreateText(screen, "Choose your next step:", 20, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f));
             title.name = "Title";
-            AddLayoutElement(title.rectTransform, preferredHeight: 40);
+            AddLayoutElement(title.rectTransform, preferredHeight: 32);
 
-            var buttonsRT = CreateUIObject("NodeButtons", screen);
-            AddLayoutElement(buttonsRT, flexibleHeight: 1);
-            var buttonsLayout = buttonsRT.gameObject.AddComponent<HorizontalLayoutGroup>();
-            buttonsLayout.spacing = 24;
-            buttonsLayout.childAlignment = TextAnchor.MiddleCenter;
-            buttonsLayout.childForceExpandWidth = false;
-            buttonsLayout.childForceExpandHeight = false;
+            // A real scrollable board, not just "the next row": Content holds every row
+            // of the run's node graph (connectors + icons + Rook's token), rebuilt fresh
+            // each ShowMapScreen() call and sized/scrolled to fit however many rows the
+            // Act has.
+            var scrollAreaRT = CreateUIObject("MapScrollArea", screen);
+            AddLayoutElement(scrollAreaRT, flexibleHeight: 1);
+            var scrollRect = scrollAreaRT.gameObject.AddComponent<ScrollRect>();
+            scrollRect.horizontal = false;
+            scrollRect.vertical = true;
+            scrollRect.movementType = ScrollRect.MovementType.Clamped;
+            scrollRect.scrollSensitivity = 25f;
+
+            var viewportRT = CreateUIObject("Viewport", scrollAreaRT);
+            StretchFull(viewportRT);
+            var viewportImg = viewportRT.gameObject.AddComponent<Image>();
+            viewportImg.color = new Color(0f, 0f, 0f, 0.02f); // Needs SOME alpha to be a drag/scroll raycast target over empty gaps between nodes.
+            viewportRT.gameObject.AddComponent<RectMask2D>();
+            scrollRect.viewport = viewportRT;
+
+            var contentRT = CreateUIObject("Content", viewportRT);
+            contentRT.anchorMin = new Vector2(0f, 0f);
+            contentRT.anchorMax = new Vector2(1f, 0f);
+            contentRT.pivot = new Vector2(0.5f, 0f);
+            contentRT.anchoredPosition = Vector2.zero;
+            contentRT.sizeDelta = new Vector2(0f, 400f); // Height recomputed every ShowMapScreen().
+            scrollRect.content = contentRT;
+            _mapContent = contentRT;
+            _mapScrollRect = scrollRect;
 
             RegisterScreen("Map", screen);
         }
