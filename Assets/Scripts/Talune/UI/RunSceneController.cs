@@ -38,6 +38,11 @@ namespace Talune.UI
         private bool _essenceAwardedThisRun;
         private const int ActCount = 3;
 
+        /// <summary>+25% enemy HP per Act above the first - the difficulty scaling that
+        /// was explicitly skipped when Acts 2/3 were first added, so a run stops being
+        /// the same fights on a different-colored background.</summary>
+        private float ActHpMultiplier => 1f + _actIndex * 0.25f;
+
         // --- Pause menu ---
         private bool _pauseMenuOpen;
         private GameObject _pauseOverlay;
@@ -50,7 +55,7 @@ namespace Talune.UI
         private CombatManager _combat;
         private RewardNodeType _pendingRewardType;
         private readonly List<string> _logLines = new();
-        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow)> _enemyUI = new();
+        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow, Image intentIcon)> _enemyUI = new();
 
         // Click-a-card-then-click-a-target flow: a card needing an enemy target waits
         // here until the player picks one (or cancels), rather than requiring a target
@@ -187,6 +192,7 @@ namespace Talune.UI
         private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
         private readonly Dictionary<CardType, Sprite> _cardIconCache = new();
         private readonly Dictionary<MapNodeType, Sprite> _mapIconCache = new();
+        private readonly Dictionary<IntentCategory, Sprite> _intentIconCache = new();
 
         private AudioSource _sfxSource;
         private readonly Dictionary<string, AudioClip> _sfxCache = new();
@@ -227,6 +233,25 @@ namespace Talune.UI
                 ? Resources.Load<Sprite>("Art/CardIcons/Attack")
                 : Resources.Load<Sprite>($"Art/MapIcons/{type}");
             _mapIconCache[type] = sprite;
+            return sprite;
+        }
+
+        /// <summary>Attack/Block/Buff/Special reuse the existing card-type icons (a sword,
+        /// a shield, a fist, a star already read fine for those meanings) - only Debuff
+        /// needed a new asset.</summary>
+        private Sprite GetIntentIcon(IntentCategory category)
+        {
+            if (_intentIconCache.TryGetValue(category, out var cached)) return cached;
+            var sprite = category switch
+            {
+                IntentCategory.Attack => Resources.Load<Sprite>("Art/CardIcons/Attack"),
+                IntentCategory.Block => Resources.Load<Sprite>("Art/CardIcons/Guard"),
+                IntentCategory.Buff => Resources.Load<Sprite>("Art/CardIcons/Power"),
+                IntentCategory.Special => Resources.Load<Sprite>("Art/CardIcons/Skill"),
+                IntentCategory.Debuff => Resources.Load<Sprite>("Art/MapIcons/Debuff"),
+                _ => null,
+            };
+            _intentIconCache[category] = sprite;
             return sprite;
         }
 
@@ -735,16 +760,19 @@ namespace Talune.UI
                     // pair every time) - a real pool, so repeat Combat nodes don't always
                     // mean the exact same fight.
                     var basicPool = new List<System.Func<EnemyCombatant>>
-                        { DefaultContent.CreateMeleeEnemy, DefaultContent.CreateRangedEnemy, DefaultContent.CreateMudshell, DefaultContent.CreateWispStinger };
+                    {
+                        () => DefaultContent.CreateMeleeEnemy(ActHpMultiplier), () => DefaultContent.CreateRangedEnemy(ActHpMultiplier),
+                        () => DefaultContent.CreateMudshell(ActHpMultiplier), () => DefaultContent.CreateWispStinger(ActHpMultiplier),
+                    };
                     int enemyCount = _rng.Next(2) == 0 ? 1 : 2;
                     var basicEnemies = Enumerable.Range(0, enemyCount).Select(_ => basicPool[_rng.Next(basicPool.Count)]()).ToList();
                     StartCombatForNode(RewardNodeType.Combat, basicEnemies);
                     break;
                 case MapNodeType.Elite:
-                    StartCombatForNode(RewardNodeType.Elite, new List<EnemyCombatant> { DefaultContent.CreateElite() });
+                    StartCombatForNode(RewardNodeType.Elite, new List<EnemyCombatant> { DefaultContent.CreateElite(ActHpMultiplier) });
                     break;
                 case MapNodeType.Boss:
-                    StartCoroutine(ShowBossIntroThenStart(DefaultContent.CreateBoss()));
+                    StartCoroutine(ShowBossIntroThenStart(DefaultContent.CreateBoss(ActHpMultiplier)));
                     break;
                 case MapNodeType.Treasure:
                     ShowTreasureReward();
@@ -880,6 +908,164 @@ namespace Talune.UI
             AddLayoutElement(gotItBtn.GetComponent<RectTransform>(), preferredHeight: 44);
         }
 
+        /// <summary>Full deck + Kin Rank readout - previously the only way to see either
+        /// was Kip's capped 8-card preview (deck) or reading a Kin Shrine's picker text
+        /// (Rank). Cards are non-interactive here (onClick is a no-op); this is a viewer,
+        /// not a management screen - upgrade/removal still only happens at Kip's shop.</summary>
+        private void ShowDeckViewer()
+        {
+            var overlayRT = CreateUIObject("DeckViewerOverlay", _canvasTransform);
+            StretchFull(overlayRT);
+            var bg = overlayRT.gameObject.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.9f);
+
+            var panelRT = CreateUIObject("Panel", overlayRT);
+            panelRT.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRT.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRT.sizeDelta = new Vector2(860, 620);
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 12;
+            panelLayout.padding = new RectOffset(26, 26, 24, 24);
+            panelLayout.childAlignment = TextAnchor.UpperCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = PanelBg;
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            var title = CreateText(panelRT, $"YOUR DECK ({_runState.Deck.Count} cards)", 22, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f), pixelFont: true);
+            AddLayoutElement(title.rectTransform, preferredHeight: 32);
+
+            var kinRowRT = CreateUIObject("KinRanks", panelRT);
+            AddLayoutElement(kinRowRT, preferredHeight: 26);
+            var kinRowLayout = kinRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
+            kinRowLayout.spacing = 24;
+            kinRowLayout.childAlignment = TextAnchor.MiddleCenter;
+            kinRowLayout.childForceExpandWidth = true;
+            foreach (var kin in new[] { KinType.Bubblo, KinType.Voltrix, KinType.Mossmaw })
+            {
+                var kinText = CreateText(kinRowRT, $"{kin}: Rank {_runState.KinRank(kin)} ({_runState.CountOfKin(kin)} cards)", 14, TextAnchor.MiddleCenter, new Color(0.8f, 0.85f, 0.95f));
+                AddLayoutElement(kinText.rectTransform, flexibleWidth: 1);
+            }
+
+            var scrollAreaRT = CreateUIObject("ScrollArea", panelRT);
+            AddLayoutElement(scrollAreaRT, flexibleHeight: 1);
+            var scrollRect = scrollAreaRT.gameObject.AddComponent<ScrollRect>();
+            scrollRect.horizontal = false;
+            scrollRect.vertical = true;
+            scrollRect.movementType = ScrollRect.MovementType.Clamped;
+            scrollRect.scrollSensitivity = 25f;
+
+            var viewportRT = CreateUIObject("Viewport", scrollAreaRT);
+            StretchFull(viewportRT);
+            var viewportImg = viewportRT.gameObject.AddComponent<Image>();
+            viewportImg.color = new Color(0f, 0f, 0f, 0.02f);
+            viewportRT.gameObject.AddComponent<RectMask2D>();
+            scrollRect.viewport = viewportRT;
+
+            var contentRT = CreateUIObject("Content", viewportRT);
+            contentRT.anchorMin = new Vector2(0f, 1f);
+            contentRT.anchorMax = new Vector2(1f, 1f);
+            contentRT.pivot = new Vector2(0.5f, 1f);
+            contentRT.anchoredPosition = Vector2.zero;
+            var contentGrid = contentRT.gameObject.AddComponent<GridLayoutGroup>();
+            contentGrid.cellSize = new Vector2(150, 210);
+            contentGrid.spacing = new Vector2(14, 14);
+            contentGrid.padding = new RectOffset(4, 4, 8, 8);
+            contentGrid.childAlignment = TextAnchor.UpperCenter;
+            var contentFitter = contentRT.gameObject.AddComponent<ContentSizeFitter>();
+            contentFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            scrollRect.content = contentRT;
+
+            foreach (var card in _runState.Deck.OrderBy(c => c.Type).ThenBy(c => c.CardName))
+            {
+                CreateCardButton(contentRT, card, true, (_) => { });
+            }
+
+            var closeBtn = CreateButton(panelRT, "CLOSE", () => Destroy(overlayRT.gameObject), new Color(0.2f, 0.2f, 0.2f));
+            AddLayoutElement(closeBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+        }
+
+        /// <summary>Reachable from both the title screen and the in-run pause menu, so
+        /// volume can be adjusted before a run even starts - reuses the same
+        /// CreateVolumeRow the pause menu already built for Music/SFX.</summary>
+        private void ShowSettingsOverlay()
+        {
+            var overlayRT = CreateUIObject("SettingsOverlay", _canvasTransform);
+            StretchFull(overlayRT);
+            var bg = overlayRT.gameObject.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.9f);
+
+            var panelRT = CreateUIObject("Panel", overlayRT);
+            panelRT.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRT.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRT.sizeDelta = new Vector2(420, 260);
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 14;
+            panelLayout.padding = new RectOffset(24, 24, 24, 24);
+            panelLayout.childAlignment = TextAnchor.UpperCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = PanelBg;
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            var title = CreateText(panelRT, "SETTINGS", 22, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f), pixelFont: true);
+            AddLayoutElement(title.rectTransform, preferredHeight: 36);
+
+            CreateVolumeRow(panelRT, "Music", () => _musicSource);
+            CreateVolumeRow(panelRT, "SFX", () => _sfxSource);
+
+            var closeBtn = CreateButton(panelRT, "CLOSE", () => Destroy(overlayRT.gameObject), new Color(0.2f, 0.2f, 0.2f));
+            AddLayoutElement(closeBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+        }
+
+        /// <summary>Essence was already tracked, but total runs / win rate / best run
+        /// depth had no visibility anywhere - MetaProgress.RecordRunEnd now feeds this.</summary>
+        private void ShowStatsOverlay()
+        {
+            var overlayRT = CreateUIObject("StatsOverlay", _canvasTransform);
+            StretchFull(overlayRT);
+            var bg = overlayRT.gameObject.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.9f);
+
+            var panelRT = CreateUIObject("Panel", overlayRT);
+            panelRT.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRT.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRT.sizeDelta = new Vector2(440, 340);
+            var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
+            panelLayout.spacing = 14;
+            panelLayout.padding = new RectOffset(24, 24, 24, 24);
+            panelLayout.childAlignment = TextAnchor.UpperCenter;
+            panelLayout.childForceExpandWidth = true;
+            panelLayout.childForceExpandHeight = false;
+            var panelImg = panelRT.gameObject.AddComponent<Image>();
+            panelImg.color = PanelBg;
+            AddDecorativeFrame(panelRT, _panelFrameSprite);
+
+            var title = CreateText(panelRT, "YOUR STATS", 22, TextAnchor.MiddleCenter, new Color(0.92f, 0.88f, 0.7f), pixelFont: true);
+            AddLayoutElement(title.rectTransform, preferredHeight: 36);
+
+            int totalRuns = MetaProgress.TotalRuns;
+            int runsWon = MetaProgress.RunsWon;
+            string winRate = totalRuns > 0 ? $"{(100f * runsWon / totalRuns):0}%" : "-";
+            string unlockLine = MetaProgress.CardUnlocked ? "Relic + Card unlocked"
+                : MetaProgress.RelicUnlocked ? "Relic unlocked" : "None yet";
+
+            var body = CreateText(panelRT,
+                $"Total Runs: {totalRuns}\n" +
+                $"Runs Won: {runsWon}\n" +
+                $"Win Rate: {winRate}\n" +
+                $"Best Run (nodes reached): {MetaProgress.BestNodesCompleted}\n" +
+                $"Essence: {MetaProgress.Essence}\n" +
+                $"Unlocks: {unlockLine}",
+                16, TextAnchor.UpperLeft, new Color(0.9f, 0.9f, 0.9f));
+            AddLayoutElement(body.rectTransform, flexibleHeight: 1);
+
+            var closeBtn = CreateButton(panelRT, "CLOSE", () => Destroy(overlayRT.gameObject), new Color(0.2f, 0.2f, 0.2f));
+            AddLayoutElement(closeBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+        }
+
         // ============================================================
         // Combat screen (mostly the same engine wiring as before)
         // ============================================================
@@ -923,6 +1109,30 @@ namespace Talune.UI
         {
             _logLines.Add(line);
             if (_logLines.Count > 200) _logLines.RemoveAt(0);
+        }
+
+        /// <summary>Wraps a plain CombatManager.Log() line in a Unity rich-text <color>
+        /// tag by keyword, entirely in the UI layer (CombatManager stays plain-text, no
+        /// engine changes) - previously every line rendered the same flat white/gray,
+        /// so the log had to be read word-by-word instead of scanned at a glance.</summary>
+        private static string ColorizeLogLine(string line)
+        {
+            string color = line switch
+            {
+                _ when line.Contains("Victory!") => "#FFD966",
+                _ when line.Contains("has fallen") => "#FF4444",
+                _ when line.Contains("takes") && line.Contains("HP left") => "#FF6B6B", // Enemy took damage.
+                _ when line.Contains("attacks for") => "#FF8C5A", // Player took damage.
+                _ when line.Contains("Thorns reflects") => "#FF8C5A",
+                _ when line.Contains("blocks for") => "#6BA8FF",
+                _ when line.Contains("Relic:") => "#F0C674",
+                _ when line.Contains("buffs itself") => "#C58CFF",
+                _ when line.Contains("uses ") => "#F0D264",
+                _ when line.Contains("Played ") => "#DDDDDD",
+                _ when line.StartsWith("---") || line.StartsWith("[Turn") => "#8899AA",
+                _ => null,
+            };
+            return color != null ? $"<color={color}>{line}</color>" : line;
         }
 
         /// <summary>Click handler for a hand card. If the card needs an enemy target
@@ -1165,6 +1375,11 @@ namespace Talune.UI
                       $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
                 if (ui.hpFill != null) SetHealthBarFill(ui.hpFill, enemy.CurrentHP, enemy.MaxHP);
                 RefreshStatusRow(ui.statusRow, enemy);
+                if (ui.intentIcon != null)
+                {
+                    ui.intentIcon.gameObject.transform.parent.gameObject.SetActive(!enemy.IsDead);
+                    if (!enemy.IsDead) ui.intentIcon.sprite = GetIntentIcon(enemy.NextIntent.Category);
+                }
 
                 if (enemy.IsDead && _deathAnimationPlayed.Add(enemy)) StartCoroutine(PlayEnemyDeathAnimation(ui.spriteImage));
             }
@@ -1221,7 +1436,7 @@ namespace Talune.UI
             RefreshStatusRow(_playerStatusRow, p);
             RefreshEnemyPanels();
             RebuildHand();
-            _logText.text = string.Join("\n", _logLines.TakeLast(6));
+            _logText.text = string.Join("\n", _logLines.TakeLast(6).Select(ColorizeLogLine));
             _drawPileText.text = _combat.Deck.DrawPileCount.ToString();
             _discardPileText.text = _combat.Deck.DiscardPileCount.ToString();
 
@@ -1276,10 +1491,17 @@ namespace Talune.UI
             for (int i = _enemyRow.childCount - 1; i >= 0; i--) DestroyImmediate(_enemyRow.GetChild(i).gameObject);
             _enemyUI.Clear();
 
+            // Elite/Boss read as tougher, not just a bigger HP number - a larger panel
+            // plus a tier banner across the top.
+            bool isElite = _pendingRewardType == RewardNodeType.Elite;
+            bool isBoss = _pendingRewardType == RewardNodeType.Boss;
+            float panelW = isBoss ? 320f : isElite ? 290f : 260f;
+            float panelH = isBoss ? 260f : isElite ? 240f : 220f;
+
             foreach (var enemy in enemies)
             {
                 var panelRT = CreateUIObject(enemy.DisplayName, _enemyRow);
-                AddLayoutElement(panelRT, preferredWidth: 260, preferredHeight: 220);
+                AddLayoutElement(panelRT, preferredWidth: panelW, preferredHeight: panelH);
                 var img = panelRT.gameObject.AddComponent<Image>();
                 AddDropShadow(img, new Vector2(5, -5));
                 var btn = panelRT.gameObject.AddComponent<Button>();
@@ -1351,9 +1573,47 @@ namespace Talune.UI
                 text.verticalOverflow = VerticalWrapMode.Overflow;
                 text.raycastTarget = false;
 
-                AddDecorativeFrame(panelRT, _panelFrameSprite); // last, so the ornate border sits on top of sprite/bar/text.
+                AddDecorativeFrame(panelRT, _panelFrameSprite); // sits on top of sprite/bar/text - see below for why the intent badge and tier tag come AFTER this, not before.
 
-                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT);
+                // Intent icon - a small badge so the intent's category ("Will do: ATTACK 9")
+                // reads at a glance instead of requiring a read of the text underneath. Must
+                // be created AFTER AddDecorativeFrame: the frame overlay stretches full-rect
+                // over the panel and its opaque corner art otherwise paints right over a
+                // corner-anchored badge (this hid the icon entirely until traced down here).
+                var intentBadgeRT = CreateUIObject("IntentIcon", panelRT);
+                intentBadgeRT.anchorMin = new Vector2(1f, 1f);
+                intentBadgeRT.anchorMax = new Vector2(1f, 1f);
+                intentBadgeRT.pivot = new Vector2(1f, 1f);
+                intentBadgeRT.sizeDelta = new Vector2(34, 34);
+                intentBadgeRT.anchoredPosition = new Vector2(-6, -6);
+                var intentBadgeImg = intentBadgeRT.gameObject.AddComponent<Image>();
+                intentBadgeImg.color = new Color(0.08f, 0.08f, 0.08f, 0.85f);
+                intentBadgeImg.raycastTarget = false;
+                var intentIconRT = CreateUIObject("Icon", intentBadgeRT);
+                StretchFull(intentIconRT);
+                intentIconRT.offsetMin += new Vector2(4, 4);
+                intentIconRT.offsetMax -= new Vector2(4, 4);
+                var intentIconImg = intentIconRT.gameObject.AddComponent<Image>();
+                intentIconImg.preserveAspect = true;
+                intentIconImg.raycastTarget = false;
+
+                if (isElite || isBoss)
+                {
+                    var tierRT = CreateUIObject("TierTag", panelRT);
+                    tierRT.anchorMin = new Vector2(0.5f, 1f);
+                    tierRT.anchorMax = new Vector2(0.5f, 1f);
+                    tierRT.pivot = new Vector2(0.5f, 1f);
+                    tierRT.sizeDelta = new Vector2(120, 22);
+                    tierRT.anchoredPosition = new Vector2(0, 2);
+                    var tierImg = tierRT.gameObject.AddComponent<Image>();
+                    tierImg.color = isBoss ? new Color(0.5f, 0.05f, 0.05f, 0.92f) : new Color(0.5f, 0.22f, 0.1f, 0.92f);
+                    tierImg.raycastTarget = false;
+                    var tierText = CreateText(tierRT, isBoss ? "BOSS" : "ELITE", 12, TextAnchor.MiddleCenter, new Color(0.95f, 0.85f, 0.5f), pixelFont: true);
+                    tierText.raycastTarget = false;
+                    StretchFull(tierText.rectTransform);
+                }
+
+                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT, intentIconImg);
             }
         }
 
@@ -1621,6 +1881,7 @@ namespace Talune.UI
                 _essenceAwardedThisRun = true;
                 int essenceEarned = _nodesCompletedThisRun * 2 + (success ? 30 : 0);
                 var newlyUnlocked = MetaProgress.AddEssence(essenceEarned);
+                MetaProgress.RecordRunEnd(success, _nodesCompletedThisRun);
                 unlockLine = $"\n\n+{essenceEarned} Essence (Total: {MetaProgress.Essence})";
                 if (newlyUnlocked.Count > 0) unlockLine += $"\n\nUNLOCKED: {string.Join(", ", newlyUnlocked)}!";
             }
@@ -1840,8 +2101,8 @@ namespace Talune.UI
             panelRT.anchorMin = new Vector2(0.5f, 0f);
             panelRT.anchorMax = new Vector2(0.5f, 0f);
             panelRT.pivot = new Vector2(0.5f, 0f);
-            panelRT.sizeDelta = new Vector2(480, 360);
-            panelRT.anchoredPosition = new Vector2(0, 80);
+            panelRT.sizeDelta = new Vector2(480, 440);
+            panelRT.anchoredPosition = new Vector2(0, 60);
             var panelLayout = panelRT.gameObject.AddComponent<VerticalLayoutGroup>();
             panelLayout.spacing = 14;
             panelLayout.childAlignment = TextAnchor.UpperCenter;
@@ -1867,6 +2128,12 @@ namespace Talune.UI
 
             var howToBtn = CreateButton(panelRT, "HOW TO PLAY", () => ShowTutorialOverlay(() => { }), new Color(0.22f, 0.22f, 0.22f));
             AddLayoutElement(howToBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+
+            var statsBtn = CreateButton(panelRT, "STATS", ShowStatsOverlay, new Color(0.22f, 0.22f, 0.22f));
+            AddLayoutElement(statsBtn.GetComponent<RectTransform>(), preferredHeight: 40);
+
+            var settingsBtn = CreateButton(panelRT, "SETTINGS", ShowSettingsOverlay, new Color(0.22f, 0.22f, 0.22f));
+            AddLayoutElement(settingsBtn.GetComponent<RectTransform>(), preferredHeight: 40);
 
             _titleScreenGO.SetActive(false);
         }
@@ -1906,6 +2173,7 @@ namespace Talune.UI
             mainRowLayout.childForceExpandWidth = true;
             var mainRowGO = mainRowRT.gameObject;
             CreateButton(mainRowRT, "RESUME", ClosePauseMenu, new Color(0.2f, 0.3f, 0.2f));
+            CreateButton(mainRowRT, "DECK", ShowDeckViewer, new Color(0.2f, 0.22f, 0.3f));
             CreateButton(mainRowRT, "ABANDON RUN", () =>
             {
                 mainRowGO.SetActive(false);
@@ -2436,9 +2704,12 @@ namespace Talune.UI
             tagRT.offsetMin = Vector2.zero;
             tagRT.offsetMax = Vector2.zero;
             var tagImg = tagRT.gameObject.AddComponent<Image>();
-            tagImg.color = CardTypeColor[card.Type];
+            // Upgraded cards get a brighter tag instead of a separate badge - there's no
+            // spare space left on this card face that isn't hidden by the hand's fan
+            // overlap on at least some cards (see the hotkey badge comment below).
+            tagImg.color = card.IsUpgraded ? Color.Lerp(CardTypeColor[card.Type], new Color(0.95f, 0.8f, 0.3f), 0.5f) : CardTypeColor[card.Type];
             tagImg.raycastTarget = false;
-            var tagText = CreateText(tagRT, card.Type.ToString().ToUpperInvariant(), 11, TextAnchor.MiddleCenter, Color.white);
+            var tagText = CreateText(tagRT, card.Type.ToString().ToUpperInvariant() + (card.IsUpgraded ? " +" : ""), 11, TextAnchor.MiddleCenter, Color.white);
             tagText.raycastTarget = false;
             StretchFull(tagText.rectTransform);
 

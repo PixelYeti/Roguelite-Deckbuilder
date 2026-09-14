@@ -317,8 +317,15 @@ namespace Talune.Content
         // AI patterns use EnemyMoveRule (weight + HP-phase gate + turn gate + anti-repeat
         // cap + forced opener) - see EnemyAI.ChooseNextMove for the selection algorithm.
 
-        public static EnemyCombatant CreateMeleeEnemy() => new(
-            "Sparkmite", BaselineNumbers.BasicEnemyStandardHP,
+        /// <summary>Scales an enemy's HP for later Acts (see RunSceneController's
+        /// _actIndex) without touching its move damage - move values live inside the
+        /// already-constructed EnemyAIProfile ScriptableObject's Rules, which would need
+        /// a much more invasive per-rule rewrite to scale safely. A tougher-but-not-more-
+        /// damaging enemy already means more turns, and so more total incoming damage.</summary>
+        private static int ScaleHP(int baseHP, float hpMultiplier) => Mathf.Max(1, Mathf.RoundToInt(baseHP * hpMultiplier));
+
+        public static EnemyCombatant CreateMeleeEnemy(float hpMultiplier = 1f) => new(
+            "Sparkmite", ScaleHP(BaselineNumbers.BasicEnemyStandardHP, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Attack, 7), weight: 2f),
                 Rule(Move(IntentCategory.Attack, 9), weight: 1f, maxConsecutive: 1), // Can't throw the big hit twice in a row.
@@ -326,8 +333,8 @@ namespace Talune.Content
 
         /// <summary>A defensive basic enemy - blocks more than it attacks, so the player
         /// has to actually break through Block rather than just racing damage.</summary>
-        public static EnemyCombatant CreateMudshell() => new(
-            "Mudshell", BaselineNumbers.BasicEnemyStandardHP + 6,
+        public static EnemyCombatant CreateMudshell(float hpMultiplier = 1f) => new(
+            "Mudshell", ScaleHP(BaselineNumbers.BasicEnemyStandardHP + 6, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Block, 10), weight: 2f),
                 Rule(Move(IntentCategory.Attack, 6), weight: 2f),
@@ -335,14 +342,14 @@ namespace Talune.Content
 
         /// <summary>A second ranged/debuff basic (alongside Glowmoth) so a Combat node
         /// drawing two ranged enemies doesn't always mean the exact same fight twice.</summary>
-        public static EnemyCombatant CreateWispStinger() => new(
-            "Wisp Stinger", BaselineNumbers.BasicEnemyWeakHP + 2,
+        public static EnemyCombatant CreateWispStinger(float hpMultiplier = 1f) => new(
+            "Wisp Stinger", ScaleHP(BaselineNumbers.BasicEnemyWeakHP + 2, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Debuff, 0, StatusEffectType.Burn, 3, "Wisp Sting"), weight: 2f),
                 Rule(Move(IntentCategory.Attack, 3), weight: 1f)));
 
-        public static EnemyCombatant CreateRangedEnemy() => new(
-            "Glowmoth", BaselineNumbers.BasicEnemyWeakHP,
+        public static EnemyCombatant CreateRangedEnemy(float hpMultiplier = 1f) => new(
+            "Glowmoth", ScaleHP(BaselineNumbers.BasicEnemyWeakHP, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Attack, 4), weight: 2f),
                 Rule(Move(IntentCategory.Debuff, 0, StatusEffectType.Burn, 2, "Spark Dust"), weight: 1f)));
@@ -350,8 +357,8 @@ namespace Talune.Content
         /// <summary>A genuinely phased pattern: opens with a buff, plays defensively
         /// above half HP, then commits to an aggressive (capped) attack pattern with
         /// an occasional Burn special once below half HP.</summary>
-        public static EnemyCombatant CreateSpecialEnemy() => new(
-            "Bog Behemoth", BaselineNumbers.BasicEnemySpecialHP,
+        public static EnemyCombatant CreateSpecialEnemy(float hpMultiplier = 1f) => new(
+            "Bog Behemoth", ScaleHP(BaselineNumbers.BasicEnemySpecialHP, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Buff, 0, StatusEffectType.Growth, 2, "Overgrowth", targetsSelf: true), forcedOpener: true),
                 Rule(Move(IntentCategory.Block, 8), weight: 2f, maxHP: 1f, minHP: 0.5f),
@@ -361,8 +368,8 @@ namespace Talune.Content
 
         /// <summary>Elite Combat, per ENEMY STRUCTURE: tougher single foe with a real
         /// pattern (charges up, then unleashes a capped-frequency big hit).</summary>
-        public static EnemyCombatant CreateElite() => new(
-            "Shard Lancer", BaselineNumbers.EliteHP,
+        public static EnemyCombatant CreateElite(float hpMultiplier = 1f) => new(
+            "Shard Lancer", ScaleHP(BaselineNumbers.EliteHP, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Buff, 0, StatusEffectType.Growth, 3, "Charge", targetsSelf: true), forcedOpener: true),
                 Rule(Move(IntentCategory.Attack, 14), weight: 2f, maxConsecutive: 1), // Can't unleash the charged hit twice in a row.
@@ -371,8 +378,8 @@ namespace Talune.Content
 
         /// <summary>Boss, per BOSSES: tests slow/passive builds by escalating Burn over
         /// time, with a defensive phase that punishes players who can't break through Block.</summary>
-        public static EnemyCombatant CreateBoss() => new(
-            "Geode Worm", BaselineNumbers.BossHP,
+        public static EnemyCombatant CreateBoss(float hpMultiplier = 1f) => new(
+            "Geode Worm", ScaleHP(BaselineNumbers.BossHP, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Special, 0, StatusEffectType.Burn, 2, "Molten Core"), weight: 1f, maxHP: 1f, minHP: 0.5f),
                 Rule(Move(IntentCategory.Block, 15), weight: 2f, maxHP: 1f, minHP: 0.5f),
