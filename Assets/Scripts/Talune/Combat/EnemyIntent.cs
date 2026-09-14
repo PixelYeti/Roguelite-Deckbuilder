@@ -9,7 +9,8 @@ namespace Talune.Combat
         Buff,
         Debuff,
         Special,
-        Summon, // Places a Ward onto the battlefield instead of acting directly - see WardCombatant.
+        Summon,  // Places a Ward onto the battlefield instead of acting directly - see WardCombatant.
+        Disrupt, // "Counter-play" - destroys one of the player's Wards instead of acting directly.
     }
 
     /// <summary>A telegraphed enemy action: category + the number the player should see

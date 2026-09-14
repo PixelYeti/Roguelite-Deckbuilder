@@ -416,14 +416,18 @@ namespace Talune.Content
                 Rule(Move(IntentCategory.Special, 0, StatusEffectType.Burn, 3, "Bog Fury"), weight: 1f, maxHP: 0.5f, minHP: 0f)));
 
         /// <summary>Elite Combat, per ENEMY STRUCTURE: tougher single foe with a real
-        /// pattern (charges up, then unleashes a capped-frequency big hit).</summary>
+        /// pattern (charges up, then unleashes a capped-frequency big hit). Also the
+        /// first enemy with real "counter-play" against the player's own Wards - a
+        /// Shard Lancer that senses a Ward on the field will occasionally shatter it
+        /// instead of attacking, mirroring the player's own Sunder card.</summary>
         public static EnemyCombatant CreateElite(float hpMultiplier = 1f) => new(
             "Shard Lancer", ScaleHP(BaselineNumbers.EliteHP, hpMultiplier),
             MakeAIProfile(
                 Rule(Move(IntentCategory.Buff, 0, StatusEffectType.Growth, 3, "Charge", targetsSelf: true), forcedOpener: true),
                 Rule(Move(IntentCategory.Attack, 14), weight: 2f, maxConsecutive: 1), // Can't unleash the charged hit twice in a row.
                 Rule(Move(IntentCategory.Block, 10), weight: 1f),
-                Rule(Move(IntentCategory.Attack, 8), weight: 2f)));
+                Rule(Move(IntentCategory.Attack, 8), weight: 2f),
+                Rule(MoveDisrupt("Shatter"), weight: 1f, minTurn: 1, maxConsecutive: 1)));
 
         /// <summary>Boss, per BOSSES: tests slow/passive builds by escalating Burn over
         /// time, with a defensive phase that punishes players who can't break through Block.</summary>
@@ -455,6 +459,18 @@ namespace Talune.Content
             {
                 Category = IntentCategory.Summon,
                 WardToSummon = ward,
+                Description = description,
+            };
+        }
+
+        /// <summary>A Disrupt-category move - "counter-play" against the player's own
+        /// Wards, destroying the player's first Ward slot instead of acting directly.
+        /// See IntentCategory.Disrupt.</summary>
+        private static EnemyMove MoveDisrupt(string description = null)
+        {
+            return new EnemyMove
+            {
+                Category = IntentCategory.Disrupt,
                 Description = description,
             };
         }

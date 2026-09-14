@@ -55,7 +55,7 @@ namespace Talune.UI
         private CombatManager _combat;
         private RewardNodeType _pendingRewardType;
         private readonly List<string> _logLines = new();
-        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow, Image intentIcon, Image hpChip)> _enemyUI = new();
+        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text, Image hpFill, Transform statusRow, Image intentIcon, Image hpChip, GameObject blockBadge, Text blockBadgeText)> _enemyUI = new();
 
         // --- Ward battlefield (see WardCombatant) - a small additive row of persistent
         // units either side can place, fully rebuilt from _combat.PlayerWards/EnemyWards
@@ -96,6 +96,8 @@ namespace Talune.UI
         private RectTransform _hudHpBarRT;
         private RectTransform _playerHpBarRT;
         private Image _playerHpChip;
+        private GameObject _playerBlockBadge;
+        private Text _playerBlockBadgeText;
         private GameObject _root; // HUD + ScreenContainer together - hidden entirely behind the title screen until a run actually starts.
         private GameObject _screenContainer;
         private Transform _canvasTransform; // Parent for ephemeral overlays (Tutorial/Intro) that must render even while _root is hidden.
@@ -137,6 +139,8 @@ namespace Talune.UI
         private Text _resultText;
         private Button _resultOverlayButton;
         private Text _drawPileText;
+        private RectTransform _drawPileRT;
+        private readonly List<CardData> _previousHandSnapshot = new();
         private Text _discardPileText;
 
         private static readonly Color PanelBg = new(0.14f, 0.14f, 0.18f);
@@ -263,6 +267,7 @@ namespace Talune.UI
                 IntentCategory.Buff => Resources.Load<Sprite>("Art/CardIcons/Power"),
                 IntentCategory.Special => Resources.Load<Sprite>("Art/CardIcons/Skill"),
                 IntentCategory.Debuff => Resources.Load<Sprite>("Art/MapIcons/Debuff"),
+                IntentCategory.Disrupt => Resources.Load<Sprite>("Art/MapIcons/Debuff"), // Reuses the Debuff icon - both read as "something bad is coming."
                 _ => null,
             };
             _intentIconCache[category] = sprite;
@@ -1151,6 +1156,11 @@ namespace Talune.UI
             _pendingRewardType = rewardType;
             _player.ClearCombatScopedStatuses(); // HP/relics persist; Growth/Thorns/Burn don't carry between fights.
             _logLines.Clear();
+            // A card left over in _previousHandSnapshot from the LAST fight (the same
+            // physical CardData instance, since RunState.Deck's cards persist across a run)
+            // would otherwise be wrongly treated as "already held" if it's drawn again here
+            // - the opening hand of a new fight is always a fresh draw.
+            _previousHandSnapshot.Clear();
             _combat = new CombatManager(_player, enemies, _runState.Deck, _rng, _runState.Relics);
             _combat.OnLog += AppendLog;
             _pendingCard = null;
@@ -1467,6 +1477,12 @@ namespace Talune.UI
                     ui.intentIcon.gameObject.transform.parent.gameObject.SetActive(!enemy.IsDead);
                     if (!enemy.IsDead) ui.intentIcon.sprite = GetIntentIcon(enemy.NextIntent.Category);
                 }
+                if (ui.blockBadge != null)
+                {
+                    bool showBlock = !enemy.IsDead && enemy.Block > 0;
+                    ui.blockBadge.SetActive(showBlock);
+                    if (showBlock) ui.blockBadgeText.text = enemy.Block.ToString();
+                }
 
                 if (enemy.IsDead && _deathAnimationPlayed.Add(enemy)) StartCoroutine(PlayEnemyDeathAnimation(ui.spriteImage));
             }
@@ -1485,15 +1501,32 @@ namespace Talune.UI
 
             bool wardTargetable = _awaitingTarget && _pendingCard != null && _pendingCard.Effects.Any(e => e.Target == TargetType.EnemyWard);
 
-            foreach (var ward in _combat.PlayerWards) CreateWardSlotPanel(_playerWardRow, ward, clickable: false);
-            foreach (var ward in _combat.EnemyWards) CreateWardSlotPanel(_enemyWardRow, ward, clickable: wardTargetable);
+            // Always render exactly WardSlotsPerSide slots (empty ones as a dim outline
+            // placeholder) rather than only the filled ones - "how many can I even summon"
+            // was previously answerable only by trying and reading a log line on failure.
+            for (int slot = 0; slot < CombatManager.WardSlotsPerSide; slot++)
+                CreateWardSlotPanel(_playerWardRow, slot < _combat.PlayerWards.Count ? _combat.PlayerWards[slot] : null, clickable: false);
+            for (int slot = 0; slot < CombatManager.WardSlotsPerSide; slot++)
+                CreateWardSlotPanel(_enemyWardRow, slot < _combat.EnemyWards.Count ? _combat.EnemyWards[slot] : null, clickable: wardTargetable);
         }
 
         private void CreateWardSlotPanel(Transform parent, WardCombatant ward, bool clickable)
         {
-            var panelRT = CreateUIObject(ward.DisplayName, parent);
+            var panelRT = CreateUIObject(ward != null ? ward.DisplayName : "EmptySlot", parent);
             AddLayoutElement(panelRT, preferredWidth: 104, preferredHeight: 88);
             var panelImg = panelRT.gameObject.AddComponent<Image>();
+
+            if (ward == null)
+            {
+                // Empty slot - a plain dim outline, no bar/text/frame, so it reads clearly
+                // as "not summoned yet" rather than competing visually with a real Ward.
+                panelImg.color = new Color(1f, 1f, 1f, 0.05f);
+                var emptyText = CreateText(panelRT, "Empty", 11, TextAnchor.MiddleCenter, new Color(1f, 1f, 1f, 0.3f));
+                emptyText.raycastTarget = false;
+                StretchFull(emptyText.rectTransform);
+                return;
+            }
+
             panelImg.color = clickable ? TargetSelectedBg : TargetBg;
 
             if (clickable)
@@ -1548,12 +1581,15 @@ namespace Talune.UI
             textRT.offsetMax = Vector2.zero;
             var text = textRT.gameObject.AddComponent<Text>();
             text.font = BuiltinFont();
-            text.fontSize = 11;
+            text.fontSize = 10;
             text.alignment = TextAnchor.MiddleCenter;
             text.color = Color.white;
             text.horizontalOverflow = HorizontalWrapMode.Wrap;
             text.raycastTarget = false;
-            text.text = (clickable ? "◆ TARGET ◆\n" : "") + $"{ward.DisplayName}\nHP {ward.CurrentHP}/{ward.MaxHP}";
+            // "Will do: X" - the same telegraphing enemies already get (Fix 9), now applied
+            // to Wards too: previously a Ward showed only its name/HP, nothing about what
+            // it actually does each turn.
+            text.text = (clickable ? "◆ TARGET ◆\n" : "") + $"{ward.DisplayName}\nHP {ward.CurrentHP}/{ward.MaxHP}\n{DescribeIntent(ward.Action.ToIntent())}";
 
             AddDecorativeFrame(panelRT, _panelFrameSprite);
 
@@ -1608,6 +1644,12 @@ namespace Talune.UI
             var p = _combat.Player;
             _playerStatsText.text = $"Rook   HP {p.CurrentHP}/{p.MaxHP}   Block {p.Block}   Energy {p.Energy}/{p.MaxEnergy}   Turn {_combat.TurnCount}";
             AnimateHealthBarFill(_playerHpFill, p.CurrentHP, p.MaxHP, _playerHpChip);
+            if (_playerBlockBadge != null)
+            {
+                bool showBlock = p.Block > 0;
+                _playerBlockBadge.SetActive(showBlock);
+                if (showBlock) _playerBlockBadgeText.text = p.Block.ToString();
+            }
             RefreshStatusRow(_playerStatusRow, p);
             RefreshEnemyPanels();
             RefreshWardPanels();
@@ -1708,6 +1750,7 @@ namespace Talune.UI
             IntentCategory.Debuff => $"DEBUFF ({intent.Description ?? "?"})",
             IntentCategory.Special => $"SPECIAL: {intent.Description ?? "?"}",
             IntentCategory.Summon => $"SUMMON: {intent.Description ?? "a Ward"}",
+            IntentCategory.Disrupt => $"DISRUPT: {intent.Description ?? "destroys your Ward"}",
             _ => "?",
         };
 
@@ -1716,13 +1759,28 @@ namespace Talune.UI
             for (int i = _handContainer.childCount - 1; i >= 0; i--) DestroyImmediate(_handContainer.GetChild(i).gameObject);
             bool ongoing = _combat.Outcome == CombatOutcome.Ongoing;
 
+            // RebuildHand destroys/recreates every card on every refresh (playing one card
+            // rebuilds the whole hand), so "was this card in the hand a moment ago" has to
+            // be tracked explicitly - CardData instances are unique per physical copy (each
+            // DefaultContent factory call makes its own ScriptableObject), so reference
+            // equality against the previous snapshot correctly identifies genuinely new
+            // draws instead of cards just being re-laid-out. Only those fly in from the
+            // draw pile (see CardEntranceAnimation); already-held cards keep the old subtle
+            // "pop up from below" so replaying a card doesn't make the rest of the hand look
+            // like it's being freshly drawn all over again.
+            var newlyDrawn = new HashSet<CardData>(_combat.Deck.Hand.Where(c => !_previousHandSnapshot.Contains(c)));
+
             int index = 0;
             foreach (var card in _combat.Deck.Hand)
             {
                 bool affordable = ongoing && _combat.Player.CanAfford(card.EnergyCost);
-                CreateCardButton(_handContainer, card, affordable, (visual) => OnCardClicked(card, visual), entranceDelay: index * 0.05f, hotkeyNumber: index < 9 ? index + 1 : null);
+                CreateCardButton(_handContainer, card, affordable, (visual) => OnCardClicked(card, visual),
+                    entranceDelay: index * 0.05f, hotkeyNumber: index < 9 ? index + 1 : null, fromDrawPile: newlyDrawn.Contains(card));
                 index++;
             }
+
+            _previousHandSnapshot.Clear();
+            _previousHandSnapshot.AddRange(_combat.Deck.Hand);
         }
 
         private void BuildEnemyPanels(List<EnemyCombatant> enemies)
@@ -1856,6 +1914,33 @@ namespace Talune.UI
                 intentIconImg.preserveAspect = true;
                 intentIconImg.raycastTarget = false;
 
+                // Block badge - mirrors the intent badge but top-left, hidden whenever
+                // Block is 0. The "Block N" text buried in the stats line under the panel
+                // was easy to miss; a shield icon (reusing the same Guard card-type icon
+                // already used for the Block intent) reads at a glance instead.
+                var blockBadgeRT = CreateUIObject("BlockBadge", panelRT);
+                blockBadgeRT.anchorMin = new Vector2(0f, 1f);
+                blockBadgeRT.anchorMax = new Vector2(0f, 1f);
+                blockBadgeRT.pivot = new Vector2(0f, 1f);
+                blockBadgeRT.sizeDelta = new Vector2(34, 34);
+                blockBadgeRT.anchoredPosition = new Vector2(6, -6);
+                var blockBadgeImg = blockBadgeRT.gameObject.AddComponent<Image>();
+                blockBadgeImg.color = new Color(0.1f, 0.18f, 0.3f, 0.85f);
+                blockBadgeImg.raycastTarget = false;
+                var blockIconRT = CreateUIObject("Icon", blockBadgeRT);
+                blockIconRT.anchorMin = Vector2.zero;
+                blockIconRT.anchorMax = new Vector2(1f, 1f);
+                blockIconRT.offsetMin = new Vector2(3, 3);
+                blockIconRT.offsetMax = new Vector2(-3, -14);
+                var blockIconImg = blockIconRT.gameObject.AddComponent<Image>();
+                blockIconImg.sprite = GetCardIcon(CardType.Guard);
+                blockIconImg.preserveAspect = true;
+                blockIconImg.raycastTarget = false;
+                var blockValueText = CreateText(blockBadgeRT, "", 11, TextAnchor.LowerCenter, new Color(0.7f, 0.85f, 1f));
+                blockValueText.raycastTarget = false;
+                StretchFull(blockValueText.rectTransform);
+                blockBadgeRT.gameObject.SetActive(false);
+
                 if (isElite || isBoss)
                 {
                     var tierRT = CreateUIObject("TierTag", panelRT);
@@ -1872,7 +1957,7 @@ namespace Talune.UI
                     StretchFull(tierText.rectTransform);
                 }
 
-                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT, intentIconImg, hpChipImg);
+                _enemyUI[enemy] = (img, spriteImg, text, hpFillImg, statusRowRT, intentIconImg, hpChipImg, blockBadgeRT.gameObject, blockValueText);
             }
         }
 
@@ -2746,6 +2831,30 @@ namespace Talune.UI
             statsLayout.childForceExpandWidth = false;
             _playerStatsText = CreateText(statsRowRT, "", 18, TextAnchor.MiddleLeft);
             AddLayoutElement(_playerStatsText.rectTransform, flexibleWidth: 1, preferredHeight: 30);
+
+            // Block badge - same shield-icon treatment as the enemy panels' corner badge,
+            // reusing the Guard card-type icon. Sits in the stats row, only visible when
+            // Block > 0, so "am I guarded right now" reads at a glance instead of requiring
+            // a read of the "Block N" text buried in the line to its left.
+            var playerBlockBadgeRT = CreateUIObject("BlockBadge", statsRowRT);
+            AddLayoutElement(playerBlockBadgeRT, preferredWidth: 34, preferredHeight: 30);
+            var playerBlockBadgeImg = playerBlockBadgeRT.gameObject.AddComponent<Image>();
+            playerBlockBadgeImg.color = new Color(0.1f, 0.18f, 0.3f, 0.85f);
+            var playerBlockIconRT = CreateUIObject("Icon", playerBlockBadgeRT);
+            playerBlockIconRT.anchorMin = Vector2.zero;
+            playerBlockIconRT.anchorMax = new Vector2(1f, 1f);
+            playerBlockIconRT.offsetMin = new Vector2(3, 12);
+            playerBlockIconRT.offsetMax = new Vector2(-3, -3);
+            var playerBlockIconImg = playerBlockIconRT.gameObject.AddComponent<Image>();
+            playerBlockIconImg.sprite = GetCardIcon(CardType.Guard);
+            playerBlockIconImg.preserveAspect = true;
+            playerBlockIconImg.raycastTarget = false;
+            _playerBlockBadgeText = CreateText(playerBlockBadgeRT, "", 11, TextAnchor.LowerCenter, new Color(0.7f, 0.85f, 1f));
+            _playerBlockBadgeText.raycastTarget = false;
+            StretchFull(_playerBlockBadgeText.rectTransform);
+            _playerBlockBadge = playerBlockBadgeRT.gameObject;
+            _playerBlockBadge.SetActive(false);
+
             _endTurnButton = CreateButton(statsRowRT, "END TURN (Space)", OnEndTurnClicked, new Color(0.25f, 0.2f, 0.1f));
             AddLayoutElement(_endTurnButton.GetComponent<RectTransform>(), preferredWidth: 180, preferredHeight: 30);
 
@@ -2803,7 +2912,7 @@ namespace Talune.UI
             handAreaLayout.childForceExpandWidth = false;
             handAreaLayout.childForceExpandHeight = false;
 
-            CreatePileWidget(handAreaRT, "DRAW", out _drawPileText);
+            _drawPileRT = CreatePileWidget(handAreaRT, "DRAW", out _drawPileText);
 
             var handRowRT = CreateUIObject("HandRow", handAreaRT);
             AddLayoutElement(handRowRT, flexibleWidth: 1, preferredHeight: 210);
@@ -3025,7 +3134,7 @@ namespace Talune.UI
 
         // --- Card button (shared by hand, rewards, and shop) ---
 
-        private Button CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction<RectTransform> onClick, float entranceDelay = 0f, int? hotkeyNumber = null)
+        private Button CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction<RectTransform> onClick, float entranceDelay = 0f, int? hotkeyNumber = null, bool fromDrawPile = false)
         {
             var slot = CreateUIObject(card.CardName, parent);
             AddLayoutElement(slot, preferredWidth: 150, preferredHeight: 210);
@@ -3173,18 +3282,33 @@ namespace Talune.UI
 
             btn.onClick.AddListener(() => onClick(visual));
             AddHoverRaise(slot, visual, sortingCanvas, glareImg);
-            StartCoroutine(CardEntranceAnimation(visual, entranceDelay));
+            StartCoroutine(CardEntranceAnimation(visual, entranceDelay, fromDrawPile ? _drawPileRT : null));
             return btn;
         }
 
         /// <summary>Cards pop in from slightly below and undersized instead of just
-        /// appearing - reads like they're being dealt/drawn rather than materializing.</summary>
-        private static IEnumerator CardEntranceAnimation(RectTransform visual, float delay)
+        /// appearing - reads like they're being dealt/drawn rather than materializing.
+        /// When `drawPileRT` is given (a genuinely new draw - see RebuildHand's
+        /// newlyDrawn tracking, since it destroys/recreates the whole hand every refresh
+        /// and can't otherwise tell a fresh draw from a card just being re-laid-out),
+        /// the card instead starts at the draw pile's own screen position and flies to
+        /// its hand slot, so drawing reads as "coming from the pile" rather than a
+        /// same-place pop.</summary>
+        private IEnumerator CardEntranceAnimation(RectTransform visual, float delay, RectTransform drawPileRT = null)
         {
             if (delay > 0) yield return new WaitForSecondsRealtime(delay);
             const float duration = 0.18f;
             Vector3 fromScale = Vector3.one * 0.6f;
             Vector2 fromPos = new(0, -40);
+            if (drawPileRT != null && visual != null && visual.parent is RectTransform slotRT)
+            {
+                var screenPoint = RectTransformUtility.WorldToScreenPoint(_uiCamera, drawPileRT.position);
+                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(slotRT, screenPoint, _uiCamera, out var localPoint))
+                {
+                    fromPos = localPoint;
+                    fromScale = Vector3.one * 0.5f; // A bit smaller still, to read as "coming from the small pile icon" rather than just a low pop.
+                }
+            }
             Quaternion fromRot = Quaternion.Euler(0f, 75f, 0f); // Starts edge-on, like flipping face-up as it's dealt.
             if (visual == null) yield break;
             visual.localScale = fromScale;

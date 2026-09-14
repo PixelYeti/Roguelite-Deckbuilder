@@ -269,6 +269,25 @@ namespace Talune.Combat
                 CheckCombatEnd();
                 return;
             }
+            if (move.Category == IntentCategory.Disrupt)
+            {
+                // "Counter-play" from the enemy side, mirroring the player's own Destroy
+                // (Sunder) card - always targets the player's first Ward slot rather than
+                // a random one, so a telegraphed "will disrupt" intent tells the player
+                // exactly which Ward is at risk, not just that something bad is coming.
+                if (PlayerWards.Count > 0)
+                {
+                    var target = PlayerWards[0];
+                    PlayerWards.RemoveAt(0);
+                    Log($"  {enemy.DisplayName} disrupts your {target.DisplayName}!");
+                }
+                else
+                {
+                    Log($"  {enemy.DisplayName} tries to disrupt, but you have no Ward to target.");
+                }
+                CheckCombatEnd();
+                return;
+            }
             ApplyMove(enemy, enemy.DisplayName, move, Player, "Rook");
         }
 
@@ -310,7 +329,8 @@ namespace Talune.Combat
                     Log($"  {selfName} uses {move.Description ?? move.Category.ToString()}.");
                     break;
                 case IntentCategory.Summon:
-                    break; // Wards don't summon further Wards in this Phase 1 slice.
+                case IntentCategory.Disrupt:
+                    break; // Wards don't summon or disrupt in this Phase 1 slice - both are handled at the enemy level (see ResolveEnemyMove), which needs CombatManager's own Ward lists.
             }
             CheckCombatEnd();
         }
