@@ -41,3 +41,6 @@ crashlytics-build.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# Unity AI asset-generation local cache/history (regeneratable, not source content)
+GeneratedAssets/

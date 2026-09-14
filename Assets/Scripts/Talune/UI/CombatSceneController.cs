@@ -35,26 +35,40 @@ namespace Talune.UI
         private Text _resultText;
         private Button _playAgainButton;
         private readonly List<string> _logLines = new();
-        private readonly Dictionary<EnemyCombatant, (Image panelImage, Text text)> _enemyUI = new();
+        private readonly Dictionary<EnemyCombatant, (Image panelImage, Image spriteImage, Text text)> _enemyUI = new();
 
         private static readonly Color PanelBg = new(0.14f, 0.14f, 0.18f);
-        private static readonly Color CardUnaffordableBg = new(0.10f, 0.10f, 0.12f);
+        private static readonly Color CardUnaffordableTint = new(0.42f, 0.42f, 0.42f, 1f); // Multiplies the frame art - darkens it instead of hiding it.
         private static readonly Color TargetSelectedBg = new(0.45f, 0.14f, 0.14f);
         private static readonly Color TargetBg = new(0.16f, 0.15f, 0.17f);
 
-        // Card background by Type - the fastest way to tell at a glance what a card
-        // does before reading it, and what was missing before (every card looked identical).
+        // Type "tag" strip color at the top of each card - the fastest way to tell at a
+        // glance what a card does before reading it, now paired with real card art.
         private static readonly Dictionary<CardType, Color> CardTypeColor = new()
         {
-            { CardType.Attack, new Color(0.35f, 0.16f, 0.16f) },
-            { CardType.Guard, new Color(0.16f, 0.24f, 0.35f) },
-            { CardType.Skill, new Color(0.17f, 0.30f, 0.20f) },
-            { CardType.Power, new Color(0.30f, 0.20f, 0.35f) },
-            { CardType.Hybrid, new Color(0.35f, 0.30f, 0.12f) },
+            { CardType.Attack, new Color(0.55f, 0.18f, 0.18f) },
+            { CardType.Guard, new Color(0.18f, 0.32f, 0.55f) },
+            { CardType.Skill, new Color(0.20f, 0.45f, 0.24f) },
+            { CardType.Power, new Color(0.45f, 0.24f, 0.55f) },
+            { CardType.Hybrid, new Color(0.55f, 0.45f, 0.14f) },
         };
+
+        private Sprite _cardFrameSprite;
+        private readonly Dictionary<string, Sprite> _enemySpriteCache = new();
+
+        /// <summary>Enemy art is looked up by DisplayName under Resources/Art/Enemies -
+        /// enemies without generated art yet just show no sprite (panel still works).</summary>
+        private Sprite GetEnemySprite(string displayName)
+        {
+            if (_enemySpriteCache.TryGetValue(displayName, out var cached)) return cached;
+            var sprite = Resources.Load<Sprite>($"Art/Enemies/{displayName}");
+            _enemySpriteCache[displayName] = sprite;
+            return sprite;
+        }
 
         private void Awake()
         {
+            _cardFrameSprite = Resources.Load<Sprite>("Art/Cards/CardFrame");
             BuildUI();
             StartNewCombat();
         }
@@ -121,6 +135,7 @@ namespace Talune.UI
                 if (!_enemyUI.TryGetValue(enemy, out var ui)) continue;
                 bool selected = enemy == _selectedTarget;
                 ui.panelImage.color = enemy.IsDead ? new Color(0.08f, 0.08f, 0.08f) : selected ? TargetSelectedBg : TargetBg;
+                if (ui.spriteImage != null) ui.spriteImage.color = enemy.IsDead ? new Color(1, 1, 1, 0.25f) : Color.white;
                 ui.text.text = enemy.IsDead
                     ? $"{enemy.DisplayName}\n(defeated)"
                     : (selected ? "▶ TARGETED ◀\n" : "(click to target)\n") +
@@ -160,15 +175,48 @@ namespace Talune.UI
             foreach (var card in _combat.Deck.Hand)
             {
                 bool affordable = ongoing && _combat.Player.CanAfford(card.EnergyCost);
-                var kinLabel = card.KinTags.Count > 0 ? $" [{string.Join("+", card.KinTags)}]" : "";
-                string label = $"{card.CardName}{kinLabel}\nCost {card.EnergyCost}\n{card.Description}";
-                var bg = affordable ? CardTypeColor[card.Type] : CardUnaffordableBg;
-                var btn = CreateButton(_handContainer, label, () => OnCardClicked(card), bg, fontSize: 13);
-                btn.interactable = affordable;
-                var le = btn.gameObject.AddComponent<LayoutElement>();
-                le.preferredWidth = 170;
-                le.preferredHeight = 170;
+                CreateCardButton(_handContainer, card, affordable, () => OnCardClicked(card));
             }
+        }
+
+        /// <summary>Builds one hand card as actual card art: the generated frame as the
+        /// full background (tinted grey when unaffordable), a colored type-tag strip up
+        /// top, and name/cost/description text on the parchment area.</summary>
+        private void CreateCardButton(Transform parent, CardData card, bool affordable, UnityAction onClick)
+        {
+            var rt = CreateUIObject(card.CardName, parent);
+            AddLayoutElement(rt, preferredWidth: 150, preferredHeight: 210);
+
+            var frameImg = rt.gameObject.AddComponent<Image>();
+            frameImg.sprite = _cardFrameSprite; // Null-safe: Image just renders as a flat white/tinted rect if no sprite was generated/found.
+            frameImg.color = affordable ? Color.white : CardUnaffordableTint;
+            frameImg.type = Image.Type.Simple;
+
+            var btn = rt.gameObject.AddComponent<Button>();
+            btn.targetGraphic = frameImg;
+            btn.interactable = affordable;
+            btn.onClick.AddListener(onClick);
+
+            // Type tag strip along the top edge, inside the frame's border.
+            var tagRT = CreateUIObject("TypeTag", rt);
+            tagRT.anchorMin = new Vector2(0.14f, 0.85f);
+            tagRT.anchorMax = new Vector2(0.86f, 0.94f);
+            tagRT.offsetMin = Vector2.zero;
+            tagRT.offsetMax = Vector2.zero;
+            var tagImg = tagRT.gameObject.AddComponent<Image>();
+            tagImg.color = CardTypeColor[card.Type];
+            var tagText = CreateText(tagRT, card.Type.ToString().ToUpperInvariant(), 11, TextAnchor.MiddleCenter, Color.white);
+            StretchFull(tagText.rectTransform);
+
+            // Name + cost + description on the parchment area, well inside the ornate border.
+            var bodyRT = CreateUIObject("Body", rt);
+            bodyRT.anchorMin = new Vector2(0.16f, 0.08f);
+            bodyRT.anchorMax = new Vector2(0.84f, 0.83f);
+            bodyRT.offsetMin = Vector2.zero;
+            bodyRT.offsetMax = Vector2.zero;
+            var kinLabel = card.KinTags.Count > 0 ? $" [{string.Join("+", card.KinTags)}]" : "";
+            var bodyText = CreateText(bodyRT, $"{card.CardName}{kinLabel}\nCost {card.EnergyCost}\n\n{card.Description}", 12, TextAnchor.UpperCenter, new Color(0.15f, 0.1f, 0.05f));
+            StretchFull(bodyText.rectTransform);
         }
 
         // --- UI construction ---
@@ -225,7 +273,7 @@ namespace Talune.UI
 
             // Enemy row.
             var enemyRowRT = CreateUIObject("EnemyRow", root);
-            AddLayoutElement(enemyRowRT, preferredHeight: 130);
+            AddLayoutElement(enemyRowRT, preferredHeight: 230);
             var enemyRowLayout = enemyRowRT.gameObject.AddComponent<HorizontalLayoutGroup>();
             enemyRowLayout.spacing = 16;
             enemyRowLayout.childAlignment = TextAnchor.MiddleCenter;
@@ -246,7 +294,7 @@ namespace Talune.UI
 
             // Bottom bar.
             var bottomBarRT = CreateUIObject("BottomBar", root);
-            AddLayoutElement(bottomBarRT, preferredHeight: 230);
+            AddLayoutElement(bottomBarRT, preferredHeight: 260);
             var bottomLayout = bottomBarRT.gameObject.AddComponent<VerticalLayoutGroup>();
             bottomLayout.spacing = 8;
             bottomLayout.childForceExpandWidth = true;
@@ -292,15 +340,46 @@ namespace Talune.UI
             foreach (var enemy in enemies)
             {
                 var panelRT = CreateUIObject(enemy.DisplayName, _enemyRow);
-                AddLayoutElement(panelRT, preferredWidth: 260, preferredHeight: 120);
+                AddLayoutElement(panelRT, preferredWidth: 260, preferredHeight: 220);
                 var img = panelRT.gameObject.AddComponent<Image>();
                 var btn = panelRT.gameObject.AddComponent<Button>();
                 btn.targetGraphic = img;
                 var capturedEnemy = enemy;
                 btn.onClick.AddListener(() => OnEnemyClicked(capturedEnemy));
-                var text = CreateText(panelRT, "", 15, TextAnchor.MiddleCenter);
-                StretchFull(text.rectTransform);
-                _enemyUI[enemy] = (img, text);
+
+                // Creature art, upper portion of the panel.
+                Image spriteImg = null;
+                var sprite = GetEnemySprite(enemy.DisplayName);
+                if (sprite != null)
+                {
+                    var spriteRT = CreateUIObject("Sprite", panelRT);
+                    spriteRT.anchorMin = new Vector2(0.5f, 1f);
+                    spriteRT.anchorMax = new Vector2(0.5f, 1f);
+                    spriteRT.pivot = new Vector2(0.5f, 1f);
+                    spriteRT.sizeDelta = new Vector2(130, 130);
+                    spriteRT.anchoredPosition = new Vector2(0, -8);
+                    spriteImg = spriteRT.gameObject.AddComponent<Image>();
+                    spriteImg.sprite = sprite;
+                    spriteImg.preserveAspect = true;
+                    spriteImg.raycastTarget = false; // Clicks should still hit the panel button underneath.
+                }
+
+                // Stats/intent text, lower portion (leaves room for the sprite above).
+                var textRT = CreateUIObject("Text", panelRT);
+                textRT.anchorMin = new Vector2(0, 0);
+                textRT.anchorMax = new Vector2(1, sprite != null ? 0.42f : 1f);
+                textRT.offsetMin = Vector2.zero;
+                textRT.offsetMax = Vector2.zero;
+                var text = textRT.gameObject.AddComponent<Text>();
+                text.font = BuiltinFont();
+                text.fontSize = 14;
+                text.alignment = TextAnchor.MiddleCenter;
+                text.color = Color.white;
+                text.horizontalOverflow = HorizontalWrapMode.Wrap;
+                text.verticalOverflow = VerticalWrapMode.Overflow;
+                text.raycastTarget = false;
+
+                _enemyUI[enemy] = (img, spriteImg, text);
             }
         }
 
