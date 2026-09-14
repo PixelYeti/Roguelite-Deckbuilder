@@ -33,8 +33,11 @@ namespace Talune.Content
             CardEffect.Block(BaselineNumbers.BasicGuardBlock)),
             "Gain 8 Block.", CardEffect.Block(8));
 
+        // Starter movement/utility card. Voltrix flavor, no literal repositioning - see
+        // the addendum's "movement is not a spatial system" note. Player-facing text
+        // stays plain; the design rationale belongs here, not on the card itself.
         public static CardData Quickstep() => WithUpgrade(MakeCard("Quickstep",
-            "Draw 1 card. (Movement/utility starter card - Voltrix flavor, no literal repositioning; see the addendum's 'movement is not a spatial system' note.)",
+            "Draw 1 card.",
             CardType.Skill, KinType.None, 0,
             CardEffect.DrawCards(1)),
             "Draw 2 cards.", CardEffect.DrawCards(2));

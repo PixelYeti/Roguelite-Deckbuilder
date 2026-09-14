@@ -28,18 +28,30 @@ namespace Talune.UI
 
         private Text _playerStatsText;
         private Text _logText;
+        private Button _endTurnButton;
         private Transform _handContainer;
         private Transform _enemyRow;
         private GameObject _resultOverlay;
         private Text _resultText;
+        private Button _playAgainButton;
         private readonly List<string> _logLines = new();
         private readonly Dictionary<EnemyCombatant, (Image panelImage, Text text)> _enemyUI = new();
 
         private static readonly Color PanelBg = new(0.14f, 0.14f, 0.18f);
-        private static readonly Color CardBg = new(0.20f, 0.20f, 0.27f);
-        private static readonly Color CardUnaffordableBg = new(0.12f, 0.12f, 0.14f);
-        private static readonly Color TargetSelectedBg = new(0.30f, 0.12f, 0.12f);
-        private static readonly Color TargetBg = new(0.18f, 0.16f, 0.18f);
+        private static readonly Color CardUnaffordableBg = new(0.10f, 0.10f, 0.12f);
+        private static readonly Color TargetSelectedBg = new(0.45f, 0.14f, 0.14f);
+        private static readonly Color TargetBg = new(0.16f, 0.15f, 0.17f);
+
+        // Card background by Type - the fastest way to tell at a glance what a card
+        // does before reading it, and what was missing before (every card looked identical).
+        private static readonly Dictionary<CardType, Color> CardTypeColor = new()
+        {
+            { CardType.Attack, new Color(0.35f, 0.16f, 0.16f) },
+            { CardType.Guard, new Color(0.16f, 0.24f, 0.35f) },
+            { CardType.Skill, new Color(0.17f, 0.30f, 0.20f) },
+            { CardType.Power, new Color(0.30f, 0.20f, 0.35f) },
+            { CardType.Hybrid, new Color(0.35f, 0.30f, 0.12f) },
+        };
 
         private void Awake()
         {
@@ -49,6 +61,7 @@ namespace Talune.UI
 
         private void StartNewCombat()
         {
+            _logLines.Clear();
             _runState = new RunState();
             _runState.Deck.AddRange(DefaultContent.BuildStarterDeck());
 
@@ -110,8 +123,8 @@ namespace Talune.UI
                 ui.panelImage.color = enemy.IsDead ? new Color(0.08f, 0.08f, 0.08f) : selected ? TargetSelectedBg : TargetBg;
                 ui.text.text = enemy.IsDead
                     ? $"{enemy.DisplayName}\n(defeated)"
-                    : $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nIntent: {DescribeIntent(enemy.NextIntent)}" +
-                      (selected ? "\n[TARGETED]" : "");
+                    : (selected ? "▶ TARGETED ◀\n" : "(click to target)\n") +
+                      $"{enemy.DisplayName}\nHP {enemy.CurrentHP}/{enemy.MaxHP}   Block {enemy.Block}\nWill do: {DescribeIntent(enemy.NextIntent)}";
             }
 
             RebuildHand();
@@ -119,9 +132,10 @@ namespace Talune.UI
             _logText.text = string.Join("\n", _logLines.TakeLast(6)); // Most recent lines only - fits the fixed-height panel without a scrollbar.
 
             bool ongoing = _combat.Outcome == CombatOutcome.Ongoing;
+            _endTurnButton.interactable = ongoing;
             _resultOverlay.SetActive(!ongoing);
             if (!ongoing)
-                _resultText.text = _combat.Outcome == CombatOutcome.Victory ? "VICTORY" : "DEFEATED";
+                _resultText.text = _combat.Outcome == CombatOutcome.Victory ? "VICTORY\n\n(click to play again)" : "DEFEATED\n\n(click to play again)";
         }
 
         private static string DescribeIntent(EnemyIntent intent) => intent.Category switch
@@ -136,7 +150,11 @@ namespace Talune.UI
 
         private void RebuildHand()
         {
-            foreach (Transform child in _handContainer) Destroy(child.gameObject);
+            // DestroyImmediate, not Destroy: this can run several times within the same
+            // frame (rapid scripted clicks, or a human double-clicking) - Destroy() defers
+            // to end-of-frame, so repeated calls would pile up stale-but-still-interactable
+            // buttons on top of each other instead of actually clearing the row first.
+            for (int i = _handContainer.childCount - 1; i >= 0; i--) DestroyImmediate(_handContainer.GetChild(i).gameObject);
             bool ongoing = _combat.Outcome == CombatOutcome.Ongoing;
 
             foreach (var card in _combat.Deck.Hand)
@@ -144,7 +162,8 @@ namespace Talune.UI
                 bool affordable = ongoing && _combat.Player.CanAfford(card.EnergyCost);
                 var kinLabel = card.KinTags.Count > 0 ? $" [{string.Join("+", card.KinTags)}]" : "";
                 string label = $"{card.CardName}{kinLabel}\nCost {card.EnergyCost}\n{card.Description}";
-                var btn = CreateButton(_handContainer, label, () => OnCardClicked(card), affordable ? CardBg : CardUnaffordableBg, fontSize: 13);
+                var bg = affordable ? CardTypeColor[card.Type] : CardUnaffordableBg;
+                var btn = CreateButton(_handContainer, label, () => OnCardClicked(card), bg, fontSize: 13);
                 btn.interactable = affordable;
                 var le = btn.gameObject.AddComponent<LayoutElement>();
                 le.preferredWidth = 170;
@@ -194,6 +213,16 @@ namespace Talune.UI
             rootLayout.childControlWidth = true;
             rootLayout.childControlHeight = true;
 
+            // Instructions - the thing that was missing: nothing told a first-time
+            // player what to click, in what order, or what the enemy panels meant.
+            var instructionsRT = CreateUIObject("Instructions", root);
+            AddLayoutElement(instructionsRT, preferredHeight: 40);
+            var instructionsImg = instructionsRT.gameObject.AddComponent<Image>();
+            instructionsImg.color = new Color(0.10f, 0.13f, 0.10f);
+            var instructionsText = CreateText(instructionsRT, "HOW TO PLAY:  1) Click an enemy panel below to target it.   2) Click a card in your hand to play it (colored by type: red=Attack, blue=Guard, green=Skill).   3) Click END TURN when done.   \"Will do:\" on an enemy shows what it plays next.",
+                14, TextAnchor.MiddleCenter, new Color(0.85f, 0.9f, 0.85f));
+            StretchFull(instructionsText.rectTransform);
+
             // Enemy row.
             var enemyRowRT = CreateUIObject("EnemyRow", root);
             AddLayoutElement(enemyRowRT, preferredHeight: 130);
@@ -229,8 +258,8 @@ namespace Talune.UI
             statsLayout.childForceExpandWidth = false;
             _playerStatsText = CreateText(statsRowRT, "", 18, TextAnchor.MiddleLeft);
             AddLayoutElement(_playerStatsText.rectTransform, flexibleWidth: 1, preferredHeight: 30);
-            var endTurnBtn = CreateButton(statsRowRT, "END TURN", OnEndTurnClicked, new Color(0.25f, 0.2f, 0.1f));
-            AddLayoutElement(endTurnBtn.GetComponent<RectTransform>(), preferredWidth: 160, preferredHeight: 30);
+            _endTurnButton = CreateButton(statsRowRT, "END TURN", OnEndTurnClicked, new Color(0.25f, 0.2f, 0.1f));
+            AddLayoutElement(_endTurnButton.GetComponent<RectTransform>(), preferredWidth: 160, preferredHeight: 30);
 
             var handRowRT = CreateUIObject("HandRow", bottomBarRT);
             AddLayoutElement(handRowRT, flexibleHeight: 1);
@@ -240,11 +269,15 @@ namespace Talune.UI
             handLayout.childForceExpandHeight = false;
             _handContainer = handRowRT;
 
-            // Result overlay.
+            // Result overlay - the whole overlay is itself a big "Play Again" button, so
+            // there's no dead end after winning or losing.
             var overlayRT = CreateUIObject("ResultOverlay", canvasGO.transform);
             StretchFull(overlayRT);
             var overlayImg = overlayRT.gameObject.AddComponent<Image>();
-            overlayImg.color = new Color(0, 0, 0, 0.75f);
+            overlayImg.color = new Color(0, 0, 0, 0.85f);
+            _playAgainButton = overlayRT.gameObject.AddComponent<Button>();
+            _playAgainButton.targetGraphic = overlayImg;
+            _playAgainButton.onClick.AddListener(StartNewCombat);
             _resultText = CreateText(overlayRT, "", 64, TextAnchor.MiddleCenter, Color.white);
             StretchFull(_resultText.rectTransform);
             _resultOverlay = overlayRT.gameObject;
@@ -253,7 +286,7 @@ namespace Talune.UI
 
         private void BuildEnemyPanels(List<EnemyCombatant> enemies)
         {
-            foreach (Transform child in _enemyRow) Destroy(child.gameObject);
+            for (int i = _enemyRow.childCount - 1; i >= 0; i--) DestroyImmediate(_enemyRow.GetChild(i).gameObject);
             _enemyUI.Clear();
 
             foreach (var enemy in enemies)
